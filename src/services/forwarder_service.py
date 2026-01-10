@@ -160,6 +160,10 @@ class ForwarderService:
         else:
             logger.info("client_already_initialized", user_id=user_id)
 
+        # Register event handler for instant delivery (works for subscribed channels)
+        client.client.add_handler(handler.get_pyrogram_handler())
+        logger.info("event_handler_registered", user_id=user_id)
+
         self._active_users[user_id] = handler
         self._user_locks[user_id] = asyncio.Lock()
 
@@ -211,9 +215,9 @@ class ForwarderService:
                     error=str(e),
                 )
 
-        # Start polling task
+        # Start fallback polling task (catches messages if event handler misses them)
         async def poll_channels():
-            logger.info("polling_started", user_id=user_id, channels=list(source_state.keys()))
+            logger.info("fallback_polling_started", user_id=user_id, channels=list(source_state.keys()))
 
             while user_id in self._active_users:
                 for channel_id, state in source_state.items():
@@ -233,7 +237,7 @@ class ForwarderService:
                             new_messages.reverse()
 
                             logger.info(
-                                "new_messages_found",
+                                "fallback_new_messages",
                                 user_id=user_id,
                                 channel=state['title'],
                                 count=len(new_messages),
@@ -251,7 +255,7 @@ class ForwarderService:
                             error=str(e),
                         )
 
-                await asyncio.sleep(5)  # Poll every 5 seconds
+                await asyncio.sleep(30)  # Fallback poll every 30 seconds
 
         # Cancel existing task if any
         if user_id in self._polling_tasks:
