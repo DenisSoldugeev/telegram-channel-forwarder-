@@ -89,6 +89,7 @@ class ForwarderService:
         self._active_users: dict[int, MessageHandler] = {}
         self._user_targets: dict[int, ForwardTarget] = {}
         self._user_locks: dict[int, asyncio.Lock] = {}
+        self._polling_tasks: dict[int, asyncio.Task] = {}
 
     def set_bot(self, bot: TelegramBot) -> None:
         """Set bot instance (for late binding after app init)."""
@@ -96,7 +97,7 @@ class ForwarderService:
 
     async def start_user_monitoring(self, user_id: int) -> None:
         """
-        Start monitoring for a user.
+        Start monitoring for a user using polling.
 
         Args:
             user_id: Telegram user ID
@@ -113,7 +114,7 @@ class ForwarderService:
         if not session_string:
             raise ForwardError("No session", "Сессия не найдена.")
 
-        # Get client (don't connect yet - start() will do it)
+        # Get client
         client = await self._client_manager.get_client(user_id, session_string)
 
         # Get sources and destination
@@ -131,18 +132,17 @@ class ForwarderService:
         if destination:
             target = ForwardTarget(is_dm=False, destination=destination)
         else:
-            # No destination configured - forward to user's DM with bot
             if not self._bot:
                 raise ForwardError("Bot not set", "Бот не инициализирован для ЛС.")
             target = ForwardTarget(is_dm=True, user_id=user_id)
 
         self._user_targets[user_id] = target
 
-        # Log source channel IDs for debugging
+        # Log source channel IDs
         source_ids = [s.channel_id for s in sources]
         logger.info("loaded_sources", user_id=user_id, source_ids=source_ids)
 
-        # Create message handler
+        # Create message handler for media group collection
         handler = MessageHandler(
             on_message=lambda msg: self._handle_message(user_id, msg, target),
             on_media_group=lambda msgs: self._handle_media_group(user_id, msgs, target),
@@ -153,9 +153,6 @@ class ForwarderService:
         for source in sources:
             handler.add_channel(source.channel_id)
 
-        # Register handler with client
-        client.client.add_handler(handler.get_pyrogram_handler())
-
         # Start Pyrogram client
         if not client.client.is_initialized:
             logger.info("starting_pyrogram_client", user_id=user_id)
@@ -165,6 +162,102 @@ class ForwarderService:
 
         self._active_users[user_id] = handler
         self._user_locks[user_id] = asyncio.Lock()
+
+        # Build source info for polling: {channel_id: last_message_id}
+        source_state = {}
+        for source in sources:
+            # Get current last message to start from
+            try:
+                # Try username first (more reliable), then channel_id
+                chat_identifier = source.channel_username or source.channel_id
+
+                logger.info(
+                    "resolving_channel",
+                    user_id=user_id,
+                    channel_id=source.channel_id,
+                    username=source.channel_username,
+                    using=chat_identifier,
+                )
+
+                chat = await client.client.get_chat(chat_identifier)
+
+                # Get latest message ID to not process old messages
+                async for msg in client.client.get_chat_history(chat.id, limit=1):
+                    source_state[source.channel_id] = {
+                        'last_msg_id': msg.id,
+                        'chat_id': chat.id,
+                        'title': chat.title,
+                    }
+                    break
+                else:
+                    source_state[source.channel_id] = {
+                        'last_msg_id': 0,
+                        'chat_id': chat.id,
+                        'title': chat.title,
+                    }
+                logger.info(
+                    "source_initialized",
+                    user_id=user_id,
+                    channel_id=source.channel_id,
+                    chat_title=chat.title,
+                    last_msg_id=source_state[source.channel_id]['last_msg_id'],
+                )
+            except Exception as e:
+                logger.error(
+                    "source_init_error",
+                    user_id=user_id,
+                    channel_id=source.channel_id,
+                    username=source.channel_username,
+                    error=str(e),
+                )
+
+        # Start polling task
+        async def poll_channels():
+            logger.info("polling_started", user_id=user_id, channels=list(source_state.keys()))
+
+            while user_id in self._active_users:
+                for channel_id, state in source_state.items():
+                    try:
+                        # Get new messages since last check
+                        new_messages = []
+                        async for msg in client.client.get_chat_history(
+                            state['chat_id'],
+                            limit=20,
+                        ):
+                            if msg.id <= state['last_msg_id']:
+                                break
+                            new_messages.append(msg)
+
+                        if new_messages:
+                            # Process in chronological order (oldest first)
+                            new_messages.reverse()
+
+                            logger.info(
+                                "new_messages_found",
+                                user_id=user_id,
+                                channel=state['title'],
+                                count=len(new_messages),
+                            )
+
+                            for msg in new_messages:
+                                await handler.process_message(msg)
+                                state['last_msg_id'] = max(state['last_msg_id'], msg.id)
+
+                    except Exception as e:
+                        logger.error(
+                            "poll_error",
+                            user_id=user_id,
+                            channel_id=channel_id,
+                            error=str(e),
+                        )
+
+                await asyncio.sleep(5)  # Poll every 5 seconds
+
+        # Cancel existing task if any
+        if user_id in self._polling_tasks:
+            self._polling_tasks[user_id].cancel()
+
+        self._polling_tasks[user_id] = asyncio.create_task(poll_channels())
 
         logger.info(
             "monitoring_started",
@@ -182,6 +275,15 @@ class ForwarderService:
             user_id: Telegram user ID
         """
         logger.info("stop_monitoring", user_id=user_id)
+
+        # Cancel polling task
+        if user_id in self._polling_tasks:
+            self._polling_tasks[user_id].cancel()
+            try:
+                await self._polling_tasks[user_id]
+            except asyncio.CancelledError:
+                pass
+            del self._polling_tasks[user_id]
 
         if user_id in self._active_users:
             del self._active_users[user_id]
@@ -575,25 +677,47 @@ class ForwarderService:
                 parse_mode="HTML",
             )
         elif message.voice:
-            # Download voice to memory
-            voice_bytes = await client.client.download_media(message, in_memory=True)
-            voice_data = BytesIO(voice_bytes.getvalue() if hasattr(voice_bytes, 'getvalue') else voice_bytes)
+            # Download voice to memory - may fail due to privacy settings
+            try:
+                voice_bytes = await client.client.download_media(message, in_memory=True)
+                voice_data = BytesIO(voice_bytes.getvalue() if hasattr(voice_bytes, 'getvalue') else voice_bytes)
 
-            result = await self._bot.send_voice(
-                chat_id=user_id,
-                voice=voice_data,
-                caption=caption,
-                parse_mode="HTML",
-            )
+                result = await self._bot.send_voice(
+                    chat_id=user_id,
+                    voice=voice_data,
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning("voice_send_failed", user_id=user_id, error=str(e))
+                # Fallback to link
+                caption += "\n\n🎤 Голосовое сообщение — перейдите по ссылке для прослушивания."
+                result = await self._bot.send_message(
+                    chat_id=user_id,
+                    text=caption,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
         elif message.video_note:
-            # Download video note to memory
-            vnote_bytes = await client.client.download_media(message, in_memory=True)
-            vnote_data = BytesIO(vnote_bytes.getvalue() if hasattr(vnote_bytes, 'getvalue') else vnote_bytes)
+            # Video notes may fail due to privacy settings
+            try:
+                vnote_bytes = await client.client.download_media(message, in_memory=True)
+                vnote_data = BytesIO(vnote_bytes.getvalue() if hasattr(vnote_bytes, 'getvalue') else vnote_bytes)
 
-            result = await self._bot.send_video_note(
-                chat_id=user_id,
-                video_note=vnote_data,
-            )
+                result = await self._bot.send_video_note(
+                    chat_id=user_id,
+                    video_note=vnote_data,
+                )
+            except Exception as e:
+                logger.warning("video_note_send_failed", user_id=user_id, error=str(e))
+                # Fallback to link
+                fallback_text = f"{header}\n\n🔵 Видеокружок — перейдите по ссылке для просмотра."
+                result = await self._bot.send_message(
+                    chat_id=user_id,
+                    text=fallback_text,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
         elif message.sticker:
             # Download sticker to memory
             sticker_bytes = await client.client.download_media(message, in_memory=True)

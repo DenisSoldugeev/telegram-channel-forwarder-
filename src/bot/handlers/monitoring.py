@@ -8,11 +8,9 @@ from src.bot.states import MAIN_MENU
 from src.services import ForwarderService
 from src.storage import get_database
 from src.storage.repositories import (
-    DeliveryRepository,
     DestinationRepository,
     SessionRepository,
     SourceRepository,
-    UserRepository,
 )
 
 logger = structlog.get_logger()
@@ -31,17 +29,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     db = get_database()
     async with db.session() as db_session:
-        user_repo = UserRepository(db_session)
         source_repo = SourceRepository(db_session)
         dest_repo = DestinationRepository(db_session)
-        delivery_repo = DeliveryRepository(db_session)
         session_repo = SessionRepository(db_session)
 
-        db_user = await user_repo.get_by_id(user.id)
         source_count = await source_repo.count_by_user(user.id)
         destination = await dest_repo.get_active_by_user(user.id)
-        stats = await delivery_repo.get_stats(user.id, hours=24)
-        last_delivery = await delivery_repo.get_last_delivery(user.id)
         user_session = await session_repo.get_by_user(user.id)
 
     # Determine session status
@@ -60,17 +53,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         monitoring_status = "⚪ Нет источников" if source_count == 0 else "❌ Требуется авторизация"
 
-    # Last forward time
-    last_time = last_delivery.completed_at.strftime("%d.%m %H:%M") if last_delivery else "—"
-
     text = Messages.STATUS.format(
         session_status=session_status,
         source_count=source_count,
         destination_name=dest_name,
         monitoring_status=monitoring_status,
-        forwarded_count=stats.get("success", 0),
-        error_count=stats.get("failed", 0),
-        last_forward_time=last_time,
     )
 
     if query:
