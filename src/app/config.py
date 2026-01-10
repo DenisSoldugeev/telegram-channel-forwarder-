@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     # Media group settings
     media_group_timeout: float = 2.0
 
+    # DM forwarding settings
+    dm_max_media_size_mb: int = 20  # Max file size in MB for DM forwarding
+
     # Auth settings
     max_auth_attempts: int = 3
     auth_code_timeout: int = 300  # 5 minutes

@@ -633,6 +633,30 @@ class ForwarderService:
 
         caption = f"{header}\n\n{original_text}" if original_text else header
 
+        # Check file size - if too large, send text only
+        file_size = self._get_media_size(message)
+        if file_size and file_size > settings.dm_max_media_size_mb * 1024 * 1024:
+            logger.info(
+                "media_too_large_for_dm",
+                user_id=user_id,
+                file_size_mb=round(file_size / (1024 * 1024), 1),
+                limit_mb=settings.dm_max_media_size_mb,
+            )
+            # Send text with link only
+            size_mb = file_size / (1024 * 1024)
+            caption += f"\n\n⚠️ Медиа слишком большое ({size_mb:.1f} МБ), перейдите по ссылке для просмотра."
+
+            if len(caption) > 4096:
+                caption = caption[:4093] + "..."
+
+            result = await self._bot.send_message(
+                chat_id=user_id,
+                text=caption,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return result.message_id
+
         # Truncate caption if too long (Telegram limit is 1024 for media, 4096 for text)
         max_caption_len = 1024 if (message.photo or message.video or message.document or message.animation) else 4096
         if len(caption) > max_caption_len:
@@ -730,7 +754,7 @@ class ForwarderService:
                 chat_id=user_id,
                 text=caption,
                 parse_mode="HTML",
-                disable_web_page_preview=False,
+                disable_web_page_preview=True,
             )
 
         return result.message_id
@@ -766,6 +790,31 @@ class ForwarderService:
             header += f" • <a href=\"{source_link}\">Оригинал</a>"
 
         caption = f"{header}\n\n{original_caption}" if original_caption else header
+
+        # Check total size of album
+        total_size = sum(self._get_media_size(msg) or 0 for msg in messages)
+        if total_size > settings.dm_max_media_size_mb * 1024 * 1024:
+            logger.info(
+                "media_group_too_large_for_dm",
+                user_id=user_id,
+                total_size_mb=round(total_size / (1024 * 1024), 1),
+                count=len(messages),
+                limit_mb=settings.dm_max_media_size_mb,
+            )
+            # Send text with link only
+            size_mb = total_size / (1024 * 1024)
+            caption += f"\n\n⚠️ Альбом слишком большой ({size_mb:.1f} МБ, {len(messages)} файлов), перейдите по ссылке для просмотра."
+
+            if len(caption) > 4096:
+                caption = caption[:4093] + "..."
+
+            result = await self._bot.send_message(
+                chat_id=user_id,
+                text=caption,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return result.message_id
 
         if len(caption) > 1024:
             caption = caption[:1021] + "..."
@@ -823,6 +872,27 @@ class ForwarderService:
         if chat_id.startswith("-100"):
             chat_id = chat_id[4:]  # Remove -100 prefix
         return f"https://t.me/c/{chat_id}/{message.id}"
+
+    def _get_media_size(self, message: Message) -> int | None:
+        """Get file size of media in message."""
+        if message.photo:
+            # Photo has multiple sizes, get the largest
+            return message.photo.file_size
+        elif message.video:
+            return message.video.file_size
+        elif message.animation:
+            return message.animation.file_size
+        elif message.document:
+            return message.document.file_size
+        elif message.audio:
+            return message.audio.file_size
+        elif message.voice:
+            return message.voice.file_size
+        elif message.video_note:
+            return message.video_note.file_size
+        elif message.sticker:
+            return message.sticker.file_size
+        return None
 
     async def _get_source_id(self, user_id: int, channel_id: int) -> int | None:
         """Get source ID for channel."""
