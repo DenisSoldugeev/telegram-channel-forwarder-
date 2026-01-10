@@ -10,6 +10,7 @@ from src.storage import get_database
 from src.storage.repositories import (
     DeliveryRepository,
     DestinationRepository,
+    SessionRepository,
     SourceRepository,
     UserRepository,
 )
@@ -29,20 +30,22 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = update.effective_user
 
     db = get_database()
-    async with db.session() as session:
-        user_repo = UserRepository(session)
-        source_repo = SourceRepository(session)
-        dest_repo = DestinationRepository(session)
-        delivery_repo = DeliveryRepository(session)
+    async with db.session() as db_session:
+        user_repo = UserRepository(db_session)
+        source_repo = SourceRepository(db_session)
+        dest_repo = DestinationRepository(db_session)
+        delivery_repo = DeliveryRepository(db_session)
+        session_repo = SessionRepository(db_session)
 
         db_user = await user_repo.get_by_id(user.id)
         source_count = await source_repo.count_by_user(user.id)
         destination = await dest_repo.get_active_by_user(user.id)
         stats = await delivery_repo.get_stats(user.id, hours=24)
         last_delivery = await delivery_repo.get_last_delivery(user.id)
+        user_session = await session_repo.get_by_user(user.id)
 
     # Determine session status
-    has_session = db_user and db_user.session and db_user.session.is_valid
+    has_session = user_session and user_session.is_valid
     session_status = "✅ Активна" if has_session else "❌ Требуется авторизация"
 
     # Destination name

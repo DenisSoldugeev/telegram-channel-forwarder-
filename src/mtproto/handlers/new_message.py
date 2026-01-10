@@ -136,12 +136,35 @@ class MessageHandler:
         self._monitored_channels: set[int] = set()
 
     def add_channel(self, channel_id: int) -> None:
-        """Add channel to monitor."""
-        self._monitored_channels.add(channel_id)
+        """Add channel to monitor (stores both raw and full format)."""
+        channel_str = str(channel_id)
+
+        if channel_str.startswith("-100"):
+            # Already in full format, extract raw
+            raw_id = int(channel_str[4:])
+            full_id = channel_id
+        else:
+            # Raw format, build full
+            raw_id = channel_id
+            full_id = int(f"-100{channel_id}")
+
+        # Store both formats for compatibility
+        self._monitored_channels.add(raw_id)
+        self._monitored_channels.add(full_id)
 
     def remove_channel(self, channel_id: int) -> None:
         """Remove channel from monitoring."""
-        self._monitored_channels.discard(channel_id)
+        channel_str = str(channel_id)
+
+        if channel_str.startswith("-100"):
+            raw_id = int(channel_str[4:])
+            full_id = channel_id
+        else:
+            raw_id = channel_id
+            full_id = int(f"-100{channel_id}")
+
+        self._monitored_channels.discard(raw_id)
+        self._monitored_channels.discard(full_id)
 
     async def handle_message(self, client: Client, message: Message) -> None:
         """
@@ -167,6 +190,38 @@ class MessageHandler:
 
         logger.info(
             "processing_message",
+            chat_id=message.chat.id,
+            message_id=message.id,
+            type=determine_message_type(message).value,
+        )
+
+        message_type = determine_message_type(message)
+
+        if message_type == MessageType.MEDIA_GROUP:
+            # Collect media group
+            await self._media_collector.add_message(
+                message,
+                self._on_media_group,
+            )
+        elif message_type != MessageType.UNSUPPORTED:
+            # Forward single message
+            await self._on_message(message)
+
+    async def process_message(self, message: Message) -> None:
+        """
+        Process a message directly (without client parameter).
+        Used for manual polling of channel updates.
+
+        Args:
+            message: Message to process
+        """
+        # Check if we're monitoring this channel
+        if message.chat.id not in self._monitored_channels:
+            logger.debug("skipping_unmonitored", chat_id=message.chat.id)
+            return
+
+        logger.info(
+            "processing_message_direct",
             chat_id=message.chat.id,
             message_id=message.id,
             type=determine_message_type(message).value,

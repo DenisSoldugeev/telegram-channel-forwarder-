@@ -89,7 +89,6 @@ class ForwarderService:
         self._active_users: dict[int, MessageHandler] = {}
         self._user_targets: dict[int, ForwardTarget] = {}
         self._user_locks: dict[int, asyncio.Lock] = {}
-        self._pyrogram_tasks: dict[int, asyncio.Task] = {}
 
     def set_bot(self, bot: TelegramBot) -> None:
         """Set bot instance (for late binding after app init)."""
@@ -157,167 +156,12 @@ class ForwarderService:
         # Register handler with client
         client.client.add_handler(handler.get_pyrogram_handler())
 
-        # Add raw handler for debugging - catches ALL updates
-        from pyrogram.handlers import RawUpdateHandler
-
-        async def raw_update_handler(client_instance, update, users, chats):
-            logger.info(
-                "raw_update",
-                update_type=type(update).__name__,
-                update=str(update)[:500],
-            )
-
-        client.client.add_handler(RawUpdateHandler(raw_update_handler), group=-1)
-
-        # Start Pyrogram client - always call start() to ensure dispatcher is running
-        # Even if already initialized, we need the dispatcher for this event loop
+        # Start Pyrogram client
         if not client.client.is_initialized:
             logger.info("starting_pyrogram_client", user_id=user_id)
             await client.client.start()
         else:
-            # Client already initialized but may need dispatcher restart
             logger.info("client_already_initialized", user_id=user_id)
-            # Check if dispatcher is running
-            if hasattr(client.client, 'dispatcher') and client.client.dispatcher:
-                logger.info(
-                    "dispatcher_status",
-                    user_id=user_id,
-                    dispatcher_exists=True,
-                )
-
-        logger.info(
-            "client_status",
-            user_id=user_id,
-            is_connected=client.client.is_connected,
-            is_initialized=client.client.is_initialized,
-        )
-
-        # Get current state and start manual update polling
-        try:
-            from pyrogram.raw import functions, types
-
-            state = await client.client.invoke(functions.updates.GetState())
-            logger.info("updates_state", user_id=user_id, pts=state.pts, qts=state.qts, date=state.date)
-
-            # Get channel info for each source to poll channel-specific updates
-            channel_pts = {}  # channel_id -> (access_hash, pts)
-            for source in sources:
-                try:
-                    # First, get chat to populate Pyrogram's cache
-                    if source.channel_username:
-                        chat = await client.client.get_chat(source.channel_username)
-                    else:
-                        chat = await client.client.get_chat(source.channel_id)
-
-                    logger.info(
-                        "got_chat_info",
-                        user_id=user_id,
-                        source_id=source.channel_id,
-                        chat_id=chat.id,
-                        chat_title=chat.title,
-                    )
-
-                    # Resolve peer to get access_hash
-                    peer = await client.client.resolve_peer(chat.id)
-                    if isinstance(peer, types.InputPeerChannel):
-                        # Get full channel info to get pts
-                        input_channel = types.InputChannel(
-                            channel_id=peer.channel_id,
-                            access_hash=peer.access_hash,
-                        )
-                        full_channel = await client.client.invoke(
-                            functions.channels.GetFullChannel(channel=input_channel)
-                        )
-
-                        # pts is in full_chat
-                        channel_full = full_channel.full_chat
-                        pts = getattr(channel_full, 'pts', 1)
-
-                        logger.info(
-                            "resolved_channel",
-                            user_id=user_id,
-                            source_id=source.channel_id,
-                            channel_id=peer.channel_id,
-                            access_hash=peer.access_hash,
-                            pts=pts,
-                        )
-
-                        channel_pts[peer.channel_id] = {
-                            'access_hash': peer.access_hash,
-                            'pts': pts,
-                            'db_channel_id': source.channel_id,
-                        }
-                except Exception as e:
-                    logger.error(
-                        "resolve_channel_error",
-                        source_id=source.channel_id,
-                        source_username=source.channel_username,
-                        error=str(e),
-                    )
-
-            # Start background task to poll for channel updates
-            async def poll_channel_updates():
-                logger.info("poll_channel_updates_started", user_id=user_id, channels=list(channel_pts.keys()))
-
-                while user_id in self._active_users:
-                    for channel_id, info in channel_pts.items():
-                        try:
-                            input_channel = types.InputChannel(
-                                channel_id=channel_id,
-                                access_hash=info['access_hash'],
-                            )
-
-                            # Use filter to get all updates
-                            channel_filter = types.ChannelMessagesFilterEmpty()
-
-                            diff = await client.client.invoke(
-                                functions.updates.GetChannelDifference(
-                                    force=True,
-                                    channel=input_channel,
-                                    filter=channel_filter,
-                                    pts=info['pts'],
-                                    limit=100,
-                                )
-                            )
-
-                            if isinstance(diff, types.updates.ChannelDifferenceEmpty):
-                                pass
-                            elif isinstance(diff, types.updates.ChannelDifference):
-                                logger.info(
-                                    "channel_updates",
-                                    user_id=user_id,
-                                    channel_id=channel_id,
-                                    new_messages=len(diff.new_messages),
-                                    pts=diff.pts,
-                                )
-                                info['pts'] = diff.pts
-
-                                # Process messages through handler
-                                for raw_msg in diff.new_messages:
-                                    logger.info(
-                                        "channel_message",
-                                        user_id=user_id,
-                                        channel_id=channel_id,
-                                        message_id=getattr(raw_msg, 'id', None),
-                                        message=str(raw_msg)[:300],
-                                    )
-                            elif isinstance(diff, types.updates.ChannelDifferenceTooLong):
-                                logger.info("channel_diff_too_long", channel_id=channel_id, pts=diff.pts)
-                                info['pts'] = diff.pts
-
-                        except Exception as e:
-                            logger.error("poll_channel_error", channel_id=channel_id, error=str(e))
-
-                    await asyncio.sleep(3)  # Poll every 3 seconds
-
-            # Cancel existing task if any
-            if user_id in self._pyrogram_tasks:
-                self._pyrogram_tasks[user_id].cancel()
-
-            self._pyrogram_tasks[user_id] = asyncio.create_task(poll_channel_updates())
-
-        except Exception as e:
-            logger.error("get_state_error", user_id=user_id, error=str(e))
 
         self._active_users[user_id] = handler
         self._user_locks[user_id] = asyncio.Lock()
@@ -343,13 +187,6 @@ class ForwarderService:
             del self._active_users[user_id]
             self._user_locks.pop(user_id, None)
 
-        # Cancel polling task
-        if user_id in self._pyrogram_tasks:
-            self._pyrogram_tasks[user_id].cancel()
-            del self._pyrogram_tasks[user_id]
-
-        # Don't disconnect client - it might be reused
-
     async def _handle_message(
         self,
         user_id: int,
@@ -357,6 +194,12 @@ class ForwarderService:
         target: ForwardTarget,
     ) -> None:
         """Handle a single message."""
+        logger.info(
+            "handle_message_called",
+            user_id=user_id,
+            chat_id=message.chat.id,
+            message_id=message.id,
+        )
         async with self._user_locks.get(user_id, asyncio.Lock()):
             await self._forward_message(user_id, message, target)
 
@@ -384,8 +227,20 @@ class ForwarderService:
             message: Message to forward
             target: Forward target (channel or DM)
         """
+        logger.info(
+            "forward_message_start",
+            user_id=user_id,
+            chat_id=message.chat.id,
+            message_id=message.id,
+        )
+
         source_id = await self._get_source_id(user_id, message.chat.id)
         if not source_id:
+            logger.warning(
+                "source_not_found",
+                user_id=user_id,
+                chat_id=message.chat.id,
+            )
             return
 
         # Check duplicate
@@ -896,9 +751,33 @@ class ForwarderService:
 
     async def _get_source_id(self, user_id: int, channel_id: int) -> int | None:
         """Get source ID for channel."""
+        # Normalize channel_id: convert from Pyrogram format (-100xxx) to raw format (xxx)
+        normalized_id = channel_id
+        channel_str = str(channel_id)
+        if channel_str.startswith("-100"):
+            normalized_id = int(channel_str[4:])
+
+        logger.debug(
+            "get_source_id",
+            user_id=user_id,
+            original_channel_id=channel_id,
+            normalized_id=normalized_id,
+        )
+
         async with self._db.session() as session:
             source_repo = SourceRepository(session)
-            source = await source_repo.get_by_channel(user_id, channel_id)
+            # Try normalized ID first
+            source = await source_repo.get_by_channel(user_id, normalized_id)
+            if not source:
+                # Try original ID (in case DB stores full format)
+                source = await source_repo.get_by_channel(user_id, channel_id)
+
+            logger.debug(
+                "get_source_id_result",
+                user_id=user_id,
+                found=source is not None,
+                source_id=source.id if source else None,
+            )
             return source.id if source else None
 
     async def _update_source_offset(self, source_id: int, message_id: int) -> None:
