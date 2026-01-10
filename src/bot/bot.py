@@ -42,6 +42,7 @@ from src.services import (
     SourceService,
 )
 from src.storage import get_database
+from src.storage.repositories import SourceRepository, UserRepository
 
 logger = structlog.get_logger()
 
@@ -102,7 +103,35 @@ class Bot:
         application.bot_data["forwarder_service"] = forwarder_service
         application.bot_data["delivery_service"] = delivery_service
 
+        # Auto-start monitoring for all users with sources
+        await self._start_all_monitoring(forwarder_service)
+
         logger.info("bot_setup_complete")
+
+    async def _start_all_monitoring(self, forwarder_service: ForwarderService) -> None:
+        """Start monitoring for all users who have sources configured."""
+        logger.info("starting_all_user_monitoring")
+
+        async with self._db.session() as session:
+            user_repo = UserRepository(session)
+            source_repo = SourceRepository(session)
+
+            # Get all users with active sessions
+            users = await user_repo.get_all_with_sessions()
+
+            started_count = 0
+            for user in users:
+                # Check if user has sources
+                source_count = await source_repo.count_by_user(user.id)
+                if source_count > 0:
+                    try:
+                        await forwarder_service.start_user_monitoring(user.id)
+                        started_count += 1
+                        logger.info("user_monitoring_started", user_id=user.id, sources=source_count)
+                    except Exception as e:
+                        logger.error("user_monitoring_failed", user_id=user.id, error=str(e))
+
+        logger.info("all_user_monitoring_started", count=started_count)
 
     async def _post_shutdown(self, application: Application) -> None:
         """Post-shutdown callback for cleanup."""

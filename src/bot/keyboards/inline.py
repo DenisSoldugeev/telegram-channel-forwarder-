@@ -12,18 +12,11 @@ def get_start_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def get_main_menu_keyboard(is_running: bool = False) -> InlineKeyboardMarkup:
+def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     """Get main menu keyboard."""
-    run_button = (
-        InlineKeyboardButton("⏹ Остановить", callback_data=f"action:{CallbackAction.STOP.value}")
-        if is_running
-        else InlineKeyboardButton("▶️ Запустить", callback_data=f"action:{CallbackAction.RUN.value}")
-    )
-
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📺 Каналы", callback_data=f"action:{CallbackAction.SOURCES.value}")],
         [InlineKeyboardButton("📤 Получатель", callback_data=f"action:{CallbackAction.DESTINATION.value}")],
-        [run_button],
         [InlineKeyboardButton("📊 Статус", callback_data=f"action:{CallbackAction.STATUS.value}")],
     ])
 

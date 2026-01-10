@@ -1,6 +1,7 @@
 from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
 
-from src.storage.models import User
+from src.storage.models import User, Session
 from src.storage.repositories.base import BaseRepository
 
 
@@ -61,5 +62,24 @@ class UserRepository(BaseRepository[User]):
             List of active users
         """
         stmt = select(User).where(User.is_active == True)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_all_with_sessions(self) -> list[User]:
+        """
+        Get all active users who have valid sessions.
+
+        Returns:
+            List of users with sessions
+        """
+        stmt = (
+            select(User)
+            .join(Session, User.id == Session.user_id)
+            .where(
+                User.is_active == True,
+                Session.is_valid == True,
+            )
+            .options(selectinload(User.session))
+        )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
