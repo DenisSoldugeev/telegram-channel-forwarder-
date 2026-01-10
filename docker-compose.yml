@@ -1,0 +1,72 @@
+version: "3.8"
+
+services:
+  # ============================================
+  # Telegram Forwarder Bot
+  # ============================================
+  bot:
+    build:
+      context: .
+      target: production
+    container_name: tg-forwarder-bot
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@db:5432/tg_forward_bot
+    volumes:
+      - bot_data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - bot_network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================
+  # PostgreSQL Database
+  # ============================================
+  db:
+    image: postgres:16-alpine
+    container_name: tg-forwarder-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: tg_forward_bot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - bot_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d tg_forward_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ============================================
+# Volumes
+# ============================================
+volumes:
+  bot_data:
+    name: tg-forwarder-bot-data
+  postgres_data:
+    name: tg-forwarder-postgres-data
+
+# ============================================
+# Networks
+# ============================================
+networks:
+  bot_network:
+    name: tg-forwarder-network
+    driver: bridge

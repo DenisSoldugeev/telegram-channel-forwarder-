@@ -90,3 +90,6 @@ logs/
 *.key
 secrets.json
 credentials.json
+
+# Docker
+docker-compose.override.yml

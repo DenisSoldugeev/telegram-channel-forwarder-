@@ -1,0 +1,25 @@
+# ============================================
+# Lightweight setup with SQLite (no PostgreSQL)
+# Usage: docker compose -f docker-compose.sqlite.yml up -d
+# ============================================
+
+version: "3.8"
+
+services:
+  bot:
+    build:
+      context: .
+      target: production
+    container_name: tg-forwarder-bot
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./data/bot.db
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
