@@ -1,0 +1,60 @@
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Application configuration loaded from environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+
+    # Telegram Bot API
+    bot_token: SecretStr
+
+    # Telegram MTProto (Pyrogram)
+    api_id: int
+    api_hash: SecretStr
+
+    # Database
+    database_url: SecretStr = SecretStr("sqlite+aiosqlite:///./data/bot.db")
+
+    # Session encryption
+    session_encryption_key: SecretStr
+
+    # Logging
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    log_format: Literal["json", "console"] = "console"
+
+    # Optional Redis
+    redis_url: SecretStr | None = None
+
+    # Rate limiting
+    max_messages_per_second: int = 30
+    flood_wait_multiplier: float = 1.5
+
+    # Retry settings
+    max_retries: int = 5
+    base_retry_delay: float = 1.0
+    max_retry_delay: float = 300.0
+
+    # Media group settings
+    media_group_timeout: float = 2.0
+
+    # Auth settings
+    max_auth_attempts: int = 3
+    auth_code_timeout: int = 300  # 5 minutes
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Get cached settings instance."""
+    return Settings()
+
+
+settings = get_settings()

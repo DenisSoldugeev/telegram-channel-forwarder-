@@ -1,0 +1,27 @@
+from src.bot.keyboards.inline import (
+    get_add_source_keyboard,
+    get_cancel_keyboard,
+    get_confirm_keyboard,
+    get_destination_keyboard,
+    get_done_cancel_keyboard,
+    get_main_menu_keyboard,
+    get_pagination_keyboard,
+    get_reauth_keyboard,
+    get_sources_keyboard,
+    get_sources_menu_keyboard,
+    get_start_keyboard,
+)
+
+__all__ = [
+    "get_start_keyboard",
+    "get_main_menu_keyboard",
+    "get_sources_menu_keyboard",
+    "get_add_source_keyboard",
+    "get_sources_keyboard",
+    "get_pagination_keyboard",
+    "get_confirm_keyboard",
+    "get_cancel_keyboard",
+    "get_done_cancel_keyboard",
+    "get_destination_keyboard",
+    "get_reauth_keyboard",
+]
