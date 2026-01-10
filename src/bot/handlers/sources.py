@@ -10,6 +10,7 @@ from telegram.ext import (
 
 from src.bot.keyboards import (
     get_add_source_keyboard,
+    get_cancel_keyboard,
     get_confirm_keyboard,
     get_done_cancel_keyboard,
     get_sources_keyboard,
@@ -109,7 +110,7 @@ async def add_source_text_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     await query.edit_message_text(
         Messages.ADD_SOURCE_TEXT_PROMPT,
-        reply_markup=get_done_cancel_keyboard(),
+        reply_markup=get_cancel_keyboard(),
     )
 
     return ADD_SOURCE_TEXT

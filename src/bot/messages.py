@@ -82,9 +82,7 @@ class Messages:
 
     ADD_SOURCE_TEXT_PROMPT = """Отправь ссылки на каналы (по одной на строку):
 
-Формат: https://t.me/channel_name или @channel_name
-
-Когда закончишь, нажми «Готово»."""
+Формат: https://t.me/channel_name или @channel_name"""
 
     ADD_SOURCE_FILE_PROMPT = """Отправь файл со списком каналов.
 
