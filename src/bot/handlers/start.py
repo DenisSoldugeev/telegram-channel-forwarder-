@@ -71,11 +71,39 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return MAIN_MENU
 
 
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle /cancel command - return to main menu from any state."""
+    user = update.effective_user
+    logger.info("cancel_command", user_id=user.id)
+
+    # Clear any pending user data
+    context.user_data.clear()
+
+    db = get_database()
+    async with db.session() as session:
+        session_repo = SessionRepository(session)
+        user_session = await session_repo.get_valid_session(user.id)
+
+        if user_session:
+            await update.message.reply_text(
+                Messages.MAIN_MENU,
+                reply_markup=get_main_menu_keyboard(),
+            )
+        else:
+            await update.message.reply_text(
+                Messages.START,
+                reply_markup=get_start_keyboard(),
+            )
+
+    return MAIN_MENU
+
+
 def get_start_handlers() -> list:
     """Get handlers for start and help commands."""
     return [
         CommandHandler("start", start_command),
         CommandHandler("help", help_command),
+        CommandHandler("cancel", cancel_command),
         CallbackQueryHandler(help_callback, pattern="^action:help$"),
         CallbackQueryHandler(main_menu_callback, pattern="^action:main_menu$"),
     ]

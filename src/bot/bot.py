@@ -106,7 +106,26 @@ class Bot:
         # Auto-start monitoring for all users with sources
         await self._start_all_monitoring(forwarder_service)
 
+        # Set bot commands menu
+        await self._set_commands(application)
+
         logger.info("bot_setup_complete")
+
+    async def _set_commands(self, application: Application) -> None:
+        """Set bot commands for menu."""
+        from telegram import BotCommand
+
+        commands = [
+            BotCommand("start", "Главное меню"),
+            BotCommand("channels", "Управление каналами"),
+            BotCommand("destination", "Настроить получателя"),
+            BotCommand("status", "Текущий статус"),
+            BotCommand("cancel", "Отмена действия"),
+            BotCommand("help", "Справка"),
+        ]
+
+        await application.bot.set_my_commands(commands)
+        logger.info("bot_commands_set")
 
     async def _start_all_monitoring(self, forwarder_service: ForwarderService) -> None:
         """Start monitoring for all users who have sources configured."""
@@ -208,9 +227,11 @@ class Bot:
             ],
         }
 
-        # Fallbacks
+        # Fallbacks - commands that work from any state
         fallbacks = [
             *get_start_handlers(),
+            *get_destination_handlers(),
+            *get_monitoring_handlers(),
         ]
 
         return ConversationHandler(
