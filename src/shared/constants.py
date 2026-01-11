@@ -79,3 +79,9 @@ CHANNEL_LINK_PATTERN = (
 )
 CHANNEL_USERNAME_PATTERN = r"^@?(?P<username>[a-zA-Z][a-zA-Z0-9_]{3,31})$"
 PHONE_PATTERN = r"^\+\d{10,15}$"
+
+# Private channel patterns
+CHANNEL_ID_PATTERN = r"^-?(?P<channel_id>\d{10,14})$"
+CHANNEL_INVITE_PATTERN = (
+    r"(?:https?://)?(?:t\.me|telegram\.me)/(?:\+|joinchat/)(?P<invite_hash>[a-zA-Z0-9_-]+)"
+)

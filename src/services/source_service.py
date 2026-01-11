@@ -1,12 +1,18 @@
 from dataclasses import dataclass, field
 
 import structlog
+from pyrogram.types import Chat
 
-from src.mtproto.client import MTProtoClientManager
+from src.mtproto.client import MTProtoClient, MTProtoClientManager
 from src.mtproto.session_manager import SessionManager
 from src.shared.constants import MAX_SOURCES_PER_USER
 from src.shared.exceptions import SourceError
-from src.shared.utils.validators import parse_channel_links, validate_channel_link
+from src.shared.utils.validators import (
+    ChannelIdentifierType,
+    ChannelValidationResult,
+    parse_channel_links,
+    validate_channel_link,
+)
 from src.storage.database import Database
 from src.storage.models import Source
 from src.storage.repositories import SourceRepository
@@ -103,21 +109,19 @@ class SourceService:
                 # Validate link format
                 validation = validate_channel_link(link)
                 if not validation.is_valid:
-                    result.errors.append(SourceAddError(link, validation.error))
+                    result.errors.append(
+                        SourceAddError(link, validation.error or "Неверный формат")
+                    )
                     continue
 
-                username = validation.username
-
                 try:
-                    # Check if user is subscribed
-                    if not await client.is_subscribed(username):
+                    # Get chat based on identifier type
+                    chat = await self._resolve_channel(client, validation)
+                    if not chat:
                         result.errors.append(
-                            SourceAddError(link, "Ты не подписан на этот канал")
+                            SourceAddError(link, "Не удалось найти канал или нет доступа")
                         )
                         continue
-
-                    # Get channel info
-                    chat = await client.get_chat(username)
 
                     # Check if already added
                     async with self._db.session() as session:
@@ -292,3 +296,44 @@ class SourceService:
         async with self._db.session() as session:
             source_repo = SourceRepository(session)
             return await source_repo.get_by_user(user_id, active_only=True, limit=100)
+
+    async def _resolve_channel(
+        self,
+        client: MTProtoClient,
+        validation: ChannelValidationResult,
+    ) -> Chat | None:
+        """
+        Resolve channel from validation result.
+
+        Handles username, channel ID, and invite links.
+
+        Args:
+            client: MTProto client
+            validation: Validated channel identifier
+
+        Returns:
+            Chat object or None if not accessible
+        """
+        try:
+            if validation.identifier_type == ChannelIdentifierType.USERNAME:
+                if validation.username:
+                    return await client.get_chat(validation.username)
+
+            elif validation.identifier_type == ChannelIdentifierType.CHANNEL_ID:
+                if validation.channel_id:
+                    return await client.get_chat(validation.channel_id)
+
+            elif validation.identifier_type == ChannelIdentifierType.INVITE_LINK:
+                # For invite links, get_chat works if user is already a member
+                if validation.invite_link:
+                    return await client.get_chat(validation.invite_link)
+
+            return None
+
+        except Exception as e:
+            logger.warning(
+                "resolve_channel_failed",
+                identifier_type=validation.identifier_type,
+                error=str(e),
+            )
+            return None

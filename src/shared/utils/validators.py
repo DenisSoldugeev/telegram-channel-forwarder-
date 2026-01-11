@@ -1,11 +1,22 @@
 import re
 from dataclasses import dataclass
+from enum import Enum
 
 from src.shared.constants import (
+    CHANNEL_ID_PATTERN,
+    CHANNEL_INVITE_PATTERN,
     CHANNEL_LINK_PATTERN,
     CHANNEL_USERNAME_PATTERN,
     PHONE_PATTERN,
 )
+
+
+class ChannelIdentifierType(str, Enum):
+    """Type of channel identifier."""
+
+    USERNAME = "username"
+    CHANNEL_ID = "channel_id"
+    INVITE_LINK = "invite_link"
 
 
 @dataclass
@@ -13,7 +24,10 @@ class ChannelValidationResult:
     """Result of channel link validation."""
 
     is_valid: bool
+    identifier_type: ChannelIdentifierType | None = None
     username: str | None = None
+    channel_id: int | None = None
+    invite_link: str | None = None
     error: str | None = None
 
 
@@ -48,30 +62,64 @@ def normalize_phone(phone: str) -> str:
     return cleaned
 
 
-def validate_channel_link(link: str) -> ChannelValidationResult:
+def validate_channel_link(link: str | None) -> ChannelValidationResult:
     """
-    Validate Telegram channel link or username.
+    Validate Telegram channel link, username, ID, or invite link.
+
+    Supports:
+        - Public channels: @username, t.me/username
+        - Private channels by ID: -1001234567890, 1234567890
+        - Private channels by invite: t.me/+abc123, t.me/joinchat/abc123
 
     Args:
-        link: Channel link or @username
+        link: Channel link, @username, numeric ID, or invite link
 
     Returns:
-        ChannelValidationResult with validation status and extracted username
+        ChannelValidationResult with validation status and identifier
     """
-    link = link.strip()
-
-    # Check for private invite links (not supported)
-    if "/+" in link or "/joinchat/" in link:
+    if not link:
         return ChannelValidationResult(
             is_valid=False,
-            error="Private invite links are not supported. Use public channel links.",
+            error="Пустая ссылка",
         )
 
-    # Try to match full URL
+    link = link.strip()
+
+    # Check for invite links first (t.me/+ or t.me/joinchat/)
+    invite_match = re.match(CHANNEL_INVITE_PATTERN, link)
+    if invite_match:
+        # Reconstruct full invite link for Pyrogram
+        invite_hash = invite_match.group("invite_hash")
+        full_invite = f"https://t.me/+{invite_hash}"
+        return ChannelValidationResult(
+            is_valid=True,
+            identifier_type=ChannelIdentifierType.INVITE_LINK,
+            invite_link=full_invite,
+        )
+
+    # Check for numeric channel ID
+    id_match = re.match(CHANNEL_ID_PATTERN, link)
+    if id_match:
+        raw_id = link.lstrip("-")
+        # Normalize to full format with -100 prefix
+        if raw_id.startswith("100") and len(raw_id) >= 13:
+            # Already in full format (e.g., 1001234567890 or -1001234567890)
+            channel_id = -int(raw_id)
+        else:
+            # Short format, add -100 prefix
+            channel_id = int(f"-100{raw_id}")
+        return ChannelValidationResult(
+            is_valid=True,
+            identifier_type=ChannelIdentifierType.CHANNEL_ID,
+            channel_id=channel_id,
+        )
+
+    # Try to match full URL (public channel)
     url_match = re.match(CHANNEL_LINK_PATTERN, link)
     if url_match:
         return ChannelValidationResult(
             is_valid=True,
+            identifier_type=ChannelIdentifierType.USERNAME,
             username=url_match.group("username"),
         )
 
@@ -80,12 +128,13 @@ def validate_channel_link(link: str) -> ChannelValidationResult:
     if username_match:
         return ChannelValidationResult(
             is_valid=True,
+            identifier_type=ChannelIdentifierType.USERNAME,
             username=username_match.group("username"),
         )
 
     return ChannelValidationResult(
         is_valid=False,
-        error="Invalid channel link format. Use https://t.me/channel or @channel",
+        error="Неверный формат. Используй @channel, t.me/channel, ID канала или invite-ссылку",
     )
 
 

@@ -117,7 +117,8 @@ async def handle_source_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     for original, result in parsed:
         if result.is_valid:
-            valid_links.append(result.username)
+            # Use original input - it will be re-validated in source_service
+            valid_links.append(original)
         else:
             errors.append(f"• {original}: {result.error}")
 

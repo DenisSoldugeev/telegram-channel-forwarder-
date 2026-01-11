@@ -84,8 +84,8 @@ async def handle_destination_input(update: Update, context: ContextTypes.DEFAULT
             )
             return DESTINATION_SETUP
 
-        # Will be resolved by service
-        channel_username = result.username
+        # Use original text - get_chat() works with username, ID, and invite link
+        channel_username = text
     else:
         await update.message.reply_text(
             "❌ Отправь ссылку на канал или перешли сообщение из него.",

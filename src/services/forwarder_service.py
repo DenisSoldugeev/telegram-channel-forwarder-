@@ -147,11 +147,19 @@ class ForwarderService:
             on_message=lambda msg: self._handle_message(user_id, msg, target),
             on_media_group=lambda msgs: self._handle_media_group(user_id, msgs, target),
             media_group_timeout=settings.media_group_timeout,
+            user_id=user_id,
         )
 
         # Add channels to monitor
         for source in sources:
             handler.add_channel(source.channel_id)
+
+        logger.info(
+            "channels_added_to_handler",
+            user_id=user_id,
+            source_ids=source_ids,
+            monitored_channels=list(handler._monitored_channels),
+        )
 
         # Start Pyrogram client
         if not client.client.is_initialized:
