@@ -215,6 +215,35 @@ class MTProtoClient:
             dialogs.append(dialog)
         return dialogs
 
+    async def warm_cache(self, limit: int = 200) -> int:
+        """
+        Warm up Pyrogram's peer cache by loading dialogs.
+
+        This prevents 'Peer id invalid' errors when receiving updates
+        from channels that aren't in the local cache.
+
+        Args:
+            limit: Maximum number of dialogs to load
+
+        Returns:
+            Number of dialogs loaded
+        """
+        try:
+            dialogs = await self.get_dialogs(limit=limit)
+            logger.info(
+                "cache_warmed",
+                user_id=self.user_id,
+                dialogs_loaded=len(dialogs),
+            )
+            return len(dialogs)
+        except Exception as e:
+            logger.warning(
+                "cache_warm_failed",
+                user_id=self.user_id,
+                error=str(e),
+            )
+            return 0
+
     async def get_chat(self, chat_id: int | str) -> Chat:
         """
         Get chat info.

@@ -160,6 +160,9 @@ class ForwarderService:
         else:
             logger.info("client_already_initialized", user_id=user_id)
 
+        # Warm up peer cache to prevent "Peer id invalid" errors
+        await client.warm_cache()
+
         # Register event handler for instant delivery (works for subscribed channels)
         client.client.add_handler(handler.get_pyrogram_handler())
         logger.info("event_handler_registered", user_id=user_id)
