@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import SecretStr, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -48,6 +48,19 @@ class Settings(BaseSettings):
 
     # DM forwarding settings
     dm_max_media_size_mb: int = 20  # Max file size in MB for DM forwarding
+
+    # Keyword filtering settings
+    filter_keywords_raw: str = ""  # Comma-separated trigger words from env
+    filter_mode: Literal["whitelist", "blacklist"] = "blacklist"
+    filter_case_sensitive: bool = False
+
+    @computed_field
+    @property
+    def filter_keywords(self) -> list[str]:
+        """Parse comma-separated keywords into list."""
+        if not self.filter_keywords_raw.strip():
+            return []
+        return [kw.strip() for kw in self.filter_keywords_raw.split(",") if kw.strip()]
 
     # Auth settings
     max_auth_attempts: int = 3

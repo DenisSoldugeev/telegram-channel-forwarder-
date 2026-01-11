@@ -319,6 +319,39 @@ class ForwarderService:
         async with self._user_locks.get(user_id, asyncio.Lock()):
             await self._forward_media_group(user_id, messages, target)
 
+    def _check_keyword_filter(self, message: Message) -> bool:
+        """
+        Check if message passes keyword filter.
+
+        Returns:
+            True if message should be forwarded, False if filtered out.
+        """
+        keywords = settings.filter_keywords
+        if not keywords:
+            # No filter configured - forward all
+            return True
+
+        # Get message text (text or caption)
+        text = message.text or message.caption or ""
+        if not text:
+            # No text to check - in whitelist mode skip, in blacklist mode allow
+            return settings.filter_mode == "blacklist"
+
+        # Prepare text for matching
+        if not settings.filter_case_sensitive:
+            text = text.lower()
+            keywords = [kw.lower() for kw in keywords]
+
+        # Check for keyword matches
+        has_match = any(kw in text for kw in keywords)
+
+        if settings.filter_mode == "whitelist":
+            # Whitelist: forward only if matches
+            return has_match
+        else:
+            # Blacklist: forward only if NOT matches
+            return not has_match
+
     async def _forward_message(
         self,
         user_id: int,
@@ -355,6 +388,16 @@ class ForwarderService:
         )
         if is_duplicate:
             logger.debug("duplicate_skipped", message_id=message.id)
+            return
+
+        # Check keyword filter
+        if not self._check_keyword_filter(message):
+            logger.info(
+                "message_filtered_by_keywords",
+                message_id=message.id,
+                chat_id=message.chat.id,
+                filter_mode=settings.filter_mode,
+            )
             return
 
         # Create pending delivery (destination_id is None for DM mode)
@@ -464,6 +507,17 @@ class ForwarderService:
             user_id, source_id, first_msg.id
         )
         if is_duplicate:
+            return
+
+        # Check keyword filter using first message (usually has caption)
+        if not self._check_keyword_filter(first_msg):
+            logger.info(
+                "media_group_filtered_by_keywords",
+                message_id=first_msg.id,
+                chat_id=first_msg.chat.id,
+                count=len(messages),
+                filter_mode=settings.filter_mode,
+            )
             return
 
         # Create pending delivery

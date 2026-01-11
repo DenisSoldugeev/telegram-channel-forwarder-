@@ -17,7 +17,6 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📺 Каналы", callback_data=f"action:{CallbackAction.SOURCES.value}")],
         [InlineKeyboardButton("📤 Получатель", callback_data=f"action:{CallbackAction.DESTINATION.value}")],
-        [InlineKeyboardButton("📊 Статус", callback_data=f"action:{CallbackAction.STATUS.value}")],
     ])
 
 
@@ -34,13 +33,10 @@ def get_sources_menu_keyboard(source_count: int = 0) -> InlineKeyboardMarkup:
 
 
 def get_add_source_keyboard() -> InlineKeyboardMarkup:
-    """Get keyboard for adding sources."""
+    """Get keyboard for adding sources (text input mode)."""
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📝 Ввести ссылки", callback_data=f"action:{CallbackAction.ADD_SOURCE_TEXT.value}"),
-            InlineKeyboardButton("📄 Загрузить файл", callback_data=f"action:{CallbackAction.ADD_SOURCE_FILE.value}"),
-        ],
-        [InlineKeyboardButton("◀️ Назад", callback_data=f"action:{CallbackAction.SOURCES.value}")],
+        [InlineKeyboardButton("📄 Загрузить файл", callback_data=f"action:{CallbackAction.ADD_SOURCE_FILE.value}")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"action:{CallbackAction.CANCEL.value}")],
     ])
 
 

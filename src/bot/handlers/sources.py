@@ -10,7 +10,6 @@ from telegram.ext import (
 
 from src.bot.keyboards import (
     get_add_source_keyboard,
-    get_cancel_keyboard,
     get_confirm_keyboard,
     get_done_cancel_keyboard,
     get_sources_keyboard,
@@ -73,20 +72,7 @@ async def sources_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 async def add_source_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show add source options."""
-    query = update.callback_query
-    await query.answer()
-
-    await query.edit_message_text(
-        Messages.ADD_SOURCE_PROMPT,
-        reply_markup=get_add_source_keyboard(),
-    )
-
-    return SOURCES_MENU
-
-
-async def add_source_text_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Start text input for adding sources."""
+    """Start adding sources - go directly to text input mode."""
     query = update.callback_query
     await query.answer()
 
@@ -110,7 +96,8 @@ async def add_source_text_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     await query.edit_message_text(
         Messages.ADD_SOURCE_TEXT_PROMPT,
-        reply_markup=get_cancel_keyboard(),
+        reply_markup=get_add_source_keyboard(),
+        parse_mode="HTML",
     )
 
     return ADD_SOURCE_TEXT
@@ -437,7 +424,6 @@ def get_sources_handlers() -> list:
 
         # Add sources
         CallbackQueryHandler(add_source_menu, pattern="^action:add_source$"),
-        CallbackQueryHandler(add_source_text_start, pattern="^action:add_source_text$"),
         CallbackQueryHandler(add_source_file_start, pattern="^action:add_source_file$"),
         CallbackQueryHandler(finish_add_sources, pattern="^action:done$"),
 
