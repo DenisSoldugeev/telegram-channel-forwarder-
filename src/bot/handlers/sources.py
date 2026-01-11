@@ -173,7 +173,7 @@ async def finish_add_sources(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 parts.append(f"  • {src.channel_title}")
 
         if result.errors:
-            parts.append(f"\n❌ Ошибки ({len(result.errors)}):")
+            parts.append(f"\n\n❌ Ошибки ({len(result.errors)}):")
             for err in result.errors[:5]:
                 parts.append(f"  • {err.link}: {err.reason}")
 
