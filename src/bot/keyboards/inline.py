@@ -12,6 +12,24 @@ def get_start_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def get_auth_method_keyboard() -> InlineKeyboardMarkup:
+    """Get keyboard for choosing auth method."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📱 QR-код (рекомендуется)", callback_data="action:auth_qr")],
+        [InlineKeyboardButton("📞 По номеру телефона", callback_data="action:auth_phone")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"action:{CallbackAction.CANCEL.value}")],
+    ])
+
+
+def get_qr_auth_keyboard() -> InlineKeyboardMarkup:
+    """Get keyboard for QR auth state."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Обновить QR", callback_data="action:refresh_qr")],
+        [InlineKeyboardButton("✅ Я отсканировал", callback_data="action:check_qr")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"action:{CallbackAction.CANCEL.value}")],
+    ])
+
+
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     """Get main menu keyboard."""
     return InlineKeyboardMarkup([

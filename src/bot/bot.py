@@ -4,8 +4,10 @@ from telegram.ext import Application, ConversationHandler, MessageHandler, filte
 from src.app.config import settings
 from src.bot.handlers import (
     error_handler,
+    get_auth_method_handlers,
     get_destination_handlers,
     get_monitoring_handlers,
+    get_qr_auth_handlers,
     get_sources_handlers,
     get_start_handlers,
 )
@@ -14,24 +16,26 @@ from src.bot.handlers.auth import (
     handle_2fa,
     handle_code,
     handle_phone,
+    handle_qr_state_text,
+)
+from src.bot.handlers.destination import handle_destination_input
+from src.bot.handlers.sources import (
+    handle_source_file,
+    handle_source_text,
 )
 from src.bot.states import (
     ADD_SOURCE_FILE,
     ADD_SOURCE_TEXT,
+    AUTH_METHOD_CHOICE,
     AWAITING_2FA,
     AWAITING_CODE,
     AWAITING_PHONE,
+    AWAITING_QR,
     DESTINATION_SETUP,
     MAIN_MENU,
     REMOVE_SOURCE,
     SOURCES_MENU,
 )
-from src.bot.handlers.sources import (
-    handle_source_file,
-    handle_source_text,
-    cancel_sources_action,
-)
-from src.bot.handlers.destination import handle_destination_input, cancel_destination
 from src.mtproto.client import MTProtoClientManager
 from src.mtproto.session_manager import SessionManager
 from src.services import (
@@ -191,6 +195,10 @@ class Bot:
                 *get_destination_handlers(),
                 *get_monitoring_handlers(),
             ],
+            AUTH_METHOD_CHOICE: [
+                *get_auth_method_handlers(),
+                *get_auth_handlers(),
+            ],
             AWAITING_PHONE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone),
                 *get_auth_handlers(),  # Cancel button support
@@ -202,6 +210,11 @@ class Bot:
             AWAITING_2FA: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_2fa),
                 *get_auth_handlers(),  # Cancel button support
+            ],
+            AWAITING_QR: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_qr_state_text),
+                *get_qr_auth_handlers(),
+                *get_auth_handlers(),
             ],
             SOURCES_MENU: [
                 *get_sources_handlers(),

@@ -22,6 +22,9 @@ class AuthResult:
     needs_2fa: bool = False
     phone_code_hash: str | None = None
     error: str | None = None
+    # QR auth fields
+    qr_image: bytes | None = None
+    qr_expires_at: int | None = None
 
 
 class AuthService:
@@ -86,6 +89,98 @@ class AuthService:
         except Exception as e:
             logger.error("start_auth_error", user_id=user_id, error=str(e))
             raise AuthError(str(e), "Не удалось отправить код. Проверь номер.")
+
+    async def start_qr_auth(self, user_id: int) -> AuthResult:
+        """
+        Start QR code authentication flow.
+
+        Args:
+            user_id: Telegram user ID
+
+        Returns:
+            AuthResult with QR image bytes
+        """
+        logger.info("start_qr_auth", user_id=user_id)
+
+        client = await self._client_manager.get_client(user_id)
+
+        try:
+            result = await client.export_qr_token()
+
+            if result.get("success"):
+                # Already authorized
+                await self._finalize_auth(user_id, client)
+                return AuthResult(success=True)
+
+            # Store QR token for later verification
+            self._pending_auth[user_id] = {
+                "qr_token": result["token"],
+                "qr_expires_at": result["expires_at"],
+            }
+
+            # Update user state
+            async with self._db.session() as session:
+                user_repo = UserRepository(session)
+                await user_repo.update_state(user_id, BotState.AWAITING_QR.value)
+
+            return AuthResult(
+                qr_image=result["qr_image"],
+                qr_expires_at=result["expires_at"],
+            )
+
+        except Exception as e:
+            logger.error("start_qr_auth_error", user_id=user_id, error=str(e))
+            raise AuthError(str(e), "Не удалось создать QR-код.")
+
+    async def check_qr_auth(self, user_id: int) -> AuthResult:
+        """
+        Check QR authentication status.
+
+        Args:
+            user_id: Telegram user ID
+
+        Returns:
+            AuthResult with status
+        """
+        logger.info("check_qr_auth", user_id=user_id)
+
+        client = await self._client_manager.get_client(user_id)
+
+        try:
+            result = await client.check_qr_login()
+
+            if result["status"] == "success":
+                await self._finalize_auth(user_id, client)
+                return AuthResult(success=True)
+
+            if result["status"] == "needs_2fa":
+                async with self._db.session() as session:
+                    user_repo = UserRepository(session)
+                    await user_repo.update_state(user_id, BotState.AWAITING_2FA.value)
+                return AuthResult(needs_2fa=True)
+
+            # Still pending
+            return AuthResult(
+                qr_expires_at=result.get("expires_at"),
+            )
+
+        except AuthError:
+            raise
+        except Exception as e:
+            logger.error("check_qr_auth_error", user_id=user_id, error=str(e))
+            raise AuthError(str(e), "Ошибка проверки QR авторизации.")
+
+    async def refresh_qr(self, user_id: int) -> AuthResult:
+        """
+        Refresh expired QR code.
+
+        Args:
+            user_id: Telegram user ID
+
+        Returns:
+            AuthResult with new QR image
+        """
+        return await self.start_qr_auth(user_id)
 
     async def verify_code(
         self,

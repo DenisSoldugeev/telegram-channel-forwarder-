@@ -5,9 +5,11 @@ class BotState(str, Enum):
     """FSM states for bot conversation."""
 
     IDLE = "idle"
+    AUTH_METHOD_CHOICE = "auth_method_choice"
     AWAITING_PHONE = "awaiting_phone"
     AWAITING_CODE = "awaiting_code"
     AWAITING_2FA = "awaiting_2fa"
+    AWAITING_QR = "awaiting_qr"
     AUTHORIZED = "authorized"
     MAIN_MENU = "main_menu"
     SOURCES_MENU = "sources_menu"

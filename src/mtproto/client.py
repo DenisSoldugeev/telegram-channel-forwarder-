@@ -1,8 +1,11 @@
 import asyncio
-from typing import AsyncIterator
+import base64
+import io
+from collections.abc import AsyncIterator
 
+import qrcode
 import structlog
-from pyrogram import Client
+from pyrogram import Client, raw
 from pyrogram.errors import (
     AuthKeyUnregistered,
     FloodWait,
@@ -104,10 +107,128 @@ class MTProtoClient:
                 "type": sent_code.type,
             }
         except FloodWait as e:
-            raise RateLimitError(f"Too many attempts", retry_after=e.value)
+            raise RateLimitError("Too many attempts", retry_after=e.value)
         except Exception as e:
             logger.error("send_code_error", user_id=self.user_id, error=str(e))
             raise AuthError(str(e), "Не удалось отправить код. Проверь номер телефона.")
+
+    async def export_qr_token(self) -> dict:
+        """
+        Export QR login token.
+
+        Returns:
+            Dict with token, qr_url, qr_image_bytes, and expires_at
+        """
+        await self.connect()
+
+        try:
+            result = await self._client.invoke(
+                raw.functions.auth.ExportLoginToken(
+                    api_id=settings.api_id,
+                    api_hash=settings.api_hash.get_secret_value(),
+                    except_ids=[],
+                )
+            )
+
+            if isinstance(result, raw.types.auth.LoginToken):
+                # Convert token to base64url for QR code
+                token_b64 = base64.urlsafe_b64encode(result.token).decode().rstrip("=")
+                qr_url = f"tg://login?token={token_b64}"
+
+                # Generate QR code image
+                qr = qrcode.QRCode(
+                    version=1,
+                    error_correction=qrcode.constants.ERROR_CORRECT_L,
+                    box_size=10,
+                    border=4,
+                )
+                qr.add_data(qr_url)
+                qr.make(fit=True)
+
+                img = qr.make_image(fill_color="black", back_color="white")
+                img_bytes = io.BytesIO()
+                img.save(img_bytes, format="PNG")
+                img_bytes.seek(0)
+
+                logger.info(
+                    "qr_token_exported",
+                    user_id=self.user_id,
+                    expires=result.expires,
+                )
+
+                return {
+                    "token": result.token,
+                    "qr_url": qr_url,
+                    "qr_image": img_bytes.getvalue(),
+                    "expires_at": result.expires,
+                }
+
+            elif isinstance(result, raw.types.auth.LoginTokenMigrateTo):
+                # Need to switch DC
+                raise AuthError("DC migration required", "Требуется переключение дата-центра.")
+
+            elif isinstance(result, raw.types.auth.LoginTokenSuccess):
+                # Already authorized
+                return {"success": True, "authorization": result.authorization}
+
+            raise AuthError("Unknown response", "Неизвестный ответ сервера.")
+
+        except FloodWait as e:
+            raise RateLimitError("Too many attempts", retry_after=e.value)
+        except AuthError:
+            raise
+        except Exception as e:
+            logger.error("export_qr_token_error", user_id=self.user_id, error=str(e))
+            raise AuthError(str(e), "Не удалось создать QR-код.")
+
+    async def check_qr_login(self) -> dict:
+        """
+        Check QR login status by re-exporting token.
+
+        Returns:
+            Dict with status: 'pending', 'success', or 'needs_2fa'
+        """
+        try:
+            result = await self._client.invoke(
+                raw.functions.auth.ExportLoginToken(
+                    api_id=settings.api_id,
+                    api_hash=settings.api_hash.get_secret_value(),
+                    except_ids=[],
+                )
+            )
+
+            if isinstance(result, raw.types.auth.LoginTokenSuccess):
+                # Authorization successful
+                auth = result.authorization
+
+                if isinstance(auth, raw.types.auth.AuthorizationSignUpRequired):
+                    raise AuthError("Sign up required", "Требуется регистрация аккаунта.")
+
+                # Extract user from authorization and update Pyrogram's internal state
+                if isinstance(auth, raw.types.auth.Authorization):
+                    user = auth.user
+                    # Update Pyrogram storage with user info
+                    await self._client.storage.user_id(user.id)
+                    await self._client.storage.is_bot(False)
+
+                logger.info("qr_login_success", user_id=self.user_id)
+                return {"status": "success"}
+
+            elif isinstance(result, raw.types.auth.LoginToken):
+                # Still waiting
+                return {"status": "pending", "expires_at": result.expires}
+
+            return {"status": "pending"}
+
+        except SessionPasswordNeeded:
+            return {"status": "needs_2fa"}
+
+        except FloodWait as e:
+            raise RateLimitError("Too many attempts", retry_after=e.value)
+
+        except Exception as e:
+            logger.error("check_qr_login_error", user_id=self.user_id, error=str(e))
+            raise AuthError(str(e), "Ошибка проверки QR авторизации.")
 
     async def sign_in(
         self,
@@ -158,7 +279,7 @@ class MTProtoClient:
             raise AuthError("Code expired", "Код истёк. Запроси новый.")
 
         except FloodWait as e:
-            raise RateLimitError(f"Too many attempts", retry_after=e.value)
+            raise RateLimitError("Too many attempts", retry_after=e.value)
 
     async def check_password(self, password: str) -> dict:
         """
@@ -178,7 +299,7 @@ class MTProtoClient:
             raise AuthError("Invalid password", "Неверный облачный пароль.")
 
         except FloodWait as e:
-            raise RateLimitError(f"Too many attempts", retry_after=e.value)
+            raise RateLimitError("Too many attempts", retry_after=e.value)
 
     async def get_session_string(self) -> str:
         """
@@ -257,7 +378,7 @@ class MTProtoClient:
         try:
             return await self._client.get_chat(chat_id)
         except FloodWait as e:
-            raise RateLimitError(f"Rate limited", retry_after=e.value)
+            raise RateLimitError("Rate limited", retry_after=e.value)
 
     async def is_subscribed(self, channel_username: str) -> bool:
         """
@@ -324,7 +445,7 @@ class MTProtoClient:
                 message_id=message_id,
             )
         except FloodWait as e:
-            raise RateLimitError(f"Rate limited", retry_after=e.value)
+            raise RateLimitError("Rate limited", retry_after=e.value)
 
     async def send_media_group(
         self,
@@ -347,7 +468,7 @@ class MTProtoClient:
                 media=media,
             )
         except FloodWait as e:
-            raise RateLimitError(f"Rate limited", retry_after=e.value)
+            raise RateLimitError("Rate limited", retry_after=e.value)
 
     async def send_poll(
         self,
@@ -375,7 +496,7 @@ class MTProtoClient:
                 **kwargs,
             )
         except FloodWait as e:
-            raise RateLimitError(f"Rate limited", retry_after=e.value)
+            raise RateLimitError("Rate limited", retry_after=e.value)
 
 
 class MTProtoClientManager:
