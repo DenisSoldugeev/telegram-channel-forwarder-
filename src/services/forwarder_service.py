@@ -332,11 +332,13 @@ class ForwarderService:
 
     def _check_keyword_filter(self, message: Message) -> bool:
         """
-        Check if message passes keyword filter.
+        Check if message passes keyword filter using whole word matching.
 
         Returns:
             True if message should be forwarded, False if filtered out.
         """
+        import re
+
         keywords = settings.filter_keywords
         if not keywords:
             # No filter configured - forward all
@@ -348,13 +350,33 @@ class ForwarderService:
             # No text to check - in whitelist mode skip, in blacklist mode allow
             return settings.filter_mode == "blacklist"
 
-        # Prepare text for matching
-        if not settings.filter_case_sensitive:
-            text = text.lower()
-            keywords = [kw.lower() for kw in keywords]
+        # Set regex flags
+        flags = 0 if settings.filter_case_sensitive else re.IGNORECASE
+
+        def matches_keyword(kw: str) -> bool:
+            """Check if keyword matches as a whole word."""
+            escaped_kw = re.escape(kw)
+
+            if kw.startswith("#"):
+                # For hashtags: match #tag at start of text or after whitespace
+                pattern = r"(?:^|(?<=\s))" + escaped_kw + r"(?=\s|$)"
+            else:
+                # For regular words: use word boundaries
+                pattern = r"\b" + escaped_kw + r"\b"
+
+            return bool(re.search(pattern, text, flags))
 
         # Check for keyword matches
-        has_match = any(kw in text for kw in keywords)
+        has_match = any(matches_keyword(kw) for kw in keywords)
+
+        if has_match:
+            # Log which keyword matched for debugging
+            matched_kw = next((kw for kw in keywords if matches_keyword(kw)), None)
+            logger.debug(
+                "keyword_matched",
+                keyword=matched_kw,
+                message_id=message.id,
+            )
 
         if settings.filter_mode == "whitelist":
             # Whitelist: forward only if matches
@@ -684,7 +706,8 @@ class ForwarderService:
             return result.message_id
 
         # Truncate caption if too long (Telegram limit is 1024 for media, 4096 for text)
-        max_caption_len = 1024 if (message.photo or message.video or message.document or message.animation) else 4096
+        has_media = message.photo or message.video or message.document or message.animation or message.audio
+        max_caption_len = 1024 if has_media else 4096
         if len(caption) > max_caption_len:
             caption = caption[:max_caption_len - 3] + "..."
 
