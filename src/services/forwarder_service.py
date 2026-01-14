@@ -670,16 +670,44 @@ class ForwarderService:
         if not self._bot:
             raise ForwardError("Bot not set", "Бот не инициализирован")
 
-        # Build caption with source info
+        from pyrogram.enums import MessageEntityType
+        from pyrogram.parser.html import HTML
+
+        # Check if message has complex formatting (blockquote, spoiler) - forward directly
+        entities = message.entities or message.caption_entities or []
+        has_complex_formatting = any(
+            e.type in (MessageEntityType.BLOCKQUOTE, MessageEntityType.SPOILER)
+            for e in entities
+        )
+
+        if has_complex_formatting:
+            # Forward directly to preserve complex formatting
+            forwarded = await client.client.forward_messages(
+                chat_id=user_id,
+                from_chat_id=message.chat.id,
+                message_ids=message.id,
+            )
+            result = forwarded if not isinstance(forwarded, list) else forwarded[0]
+            return result.id
+
+        # Build caption with source info, preserving original formatting (links, bold, etc.)
+
         source_title = message.chat.title or message.chat.username or "Unknown"
         source_link = self._get_message_link(message)
 
-        original_text = message.text or message.caption or ""
+        # Get original text with HTML formatting (preserves links, bold, italic, etc.)
+        if message.text:
+            original_html = HTML.unparse(message.text, message.entities or [])
+        elif message.caption:
+            original_html = HTML.unparse(message.caption, message.caption_entities or [])
+        else:
+            original_html = ""
+
         header = f"📢 <b>{source_title}</b>"
         if source_link:
             header += f" • <a href=\"{source_link}\">Оригинал</a>"
 
-        caption = f"{header}\n\n{original_text}" if original_text else header
+        caption = f"{header}\n\n{original_html}" if original_html else header
 
         # Check file size - if too large, send text only
         file_size = self._get_media_size(message)
@@ -769,47 +797,21 @@ class ForwarderService:
                 parse_mode="HTML",
             )
         elif message.voice:
-            # Download voice to memory - may fail due to privacy settings
-            try:
-                voice_bytes = await client.client.download_media(message, in_memory=True)
-                voice_data = BytesIO(voice_bytes.getvalue() if hasattr(voice_bytes, 'getvalue') else voice_bytes)
-
-                result = await self._bot.send_voice(
-                    chat_id=user_id,
-                    voice=voice_data,
-                    caption=caption,
-                    parse_mode="HTML",
-                )
-            except Exception as e:
-                logger.warning("voice_send_failed", user_id=user_id, error=str(e))
-                # Fallback to link
-                caption += "\n\n🎤 Голосовое сообщение — перейдите по ссылке для прослушивания."
-                result = await self._bot.send_message(
-                    chat_id=user_id,
-                    text=caption,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
+            # Forward voice messages directly (keeps "Forwarded from" label but works reliably)
+            forwarded = await client.client.forward_messages(
+                chat_id=user_id,
+                from_chat_id=message.chat.id,
+                message_ids=message.id,
+            )
+            result = forwarded if not isinstance(forwarded, list) else forwarded[0]
         elif message.video_note:
-            # Video notes may fail due to privacy settings
-            try:
-                vnote_bytes = await client.client.download_media(message, in_memory=True)
-                vnote_data = BytesIO(vnote_bytes.getvalue() if hasattr(vnote_bytes, 'getvalue') else vnote_bytes)
-
-                result = await self._bot.send_video_note(
-                    chat_id=user_id,
-                    video_note=vnote_data,
-                )
-            except Exception as e:
-                logger.warning("video_note_send_failed", user_id=user_id, error=str(e))
-                # Fallback to link
-                fallback_text = f"{header}\n\n🔵 Видеокружок — перейдите по ссылке для просмотра."
-                result = await self._bot.send_message(
-                    chat_id=user_id,
-                    text=fallback_text,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
+            # Forward video notes directly (keeps "Forwarded from" label but works reliably)
+            forwarded = await client.client.forward_messages(
+                chat_id=user_id,
+                from_chat_id=message.chat.id,
+                message_ids=message.id,
+            )
+            result = forwarded if not isinstance(forwarded, list) else forwarded[0]
         elif message.sticker:
             # Download sticker to memory
             sticker_bytes = await client.client.download_media(message, in_memory=True)
@@ -820,12 +822,11 @@ class ForwarderService:
                 sticker=sticker_data,
             )
         else:
-            # Text message or unsupported type - send as text
+            # Text message or unsupported type - send as text (with link preview enabled)
             result = await self._bot.send_message(
                 chat_id=user_id,
                 text=caption,
                 parse_mode="HTML",
-                disable_web_page_preview=True,
             )
 
         return result.message_id
@@ -850,17 +851,23 @@ class ForwarderService:
         if not self._bot:
             raise ForwardError("Bot not set", "Бот не инициализирован")
 
+        from pyrogram.parser.html import HTML
+
         first_msg = messages[0]
         source_title = first_msg.chat.title or first_msg.chat.username or "Unknown"
         source_link = self._get_message_link(first_msg)
 
-        # Build caption for first media item
-        original_caption = first_msg.caption or ""
+        # Build caption with HTML formatting preserved (links, bold, etc.)
+        if first_msg.caption:
+            original_html = HTML.unparse(first_msg.caption, first_msg.caption_entities or [])
+        else:
+            original_html = ""
+
         header = f"📢 <b>{source_title}</b>"
         if source_link:
             header += f" • <a href=\"{source_link}\">Оригинал</a>"
 
-        caption = f"{header}\n\n{original_caption}" if original_caption else header
+        caption = f"{header}\n\n{original_html}" if original_html else header
 
         # Check total size of album
         total_size = sum(self._get_media_size(msg) or 0 for msg in messages)
