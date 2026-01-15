@@ -30,21 +30,25 @@ from src.storage.repositories import SourceRepository
 logger = structlog.get_logger()
 
 
-async def _restart_user_monitoring(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Restart monitoring for user after source changes."""
+async def _do_restart_monitoring(forwarder: ForwarderService, user_id: int) -> None:
+    """Actually restart monitoring (runs in background)."""
+    try:
+        await forwarder.stop_user_monitoring(user_id)
+    except Exception:
+        pass
+    try:
+        await forwarder.start_user_monitoring(user_id)
+        logger.info("monitoring_restarted", user_id=user_id)
+    except Exception as e:
+        logger.error("monitoring_restart_failed", user_id=user_id, error=str(e))
+
+
+def _restart_user_monitoring(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Schedule monitoring restart in background (non-blocking)."""
     forwarder: ForwarderService = context.bot_data.get("forwarder_service")
     if forwarder:
-        try:
-            # Stop existing monitoring if running
-            await forwarder.stop_user_monitoring(user_id)
-        except Exception:
-            pass
-        try:
-            # Start fresh monitoring
-            await forwarder.start_user_monitoring(user_id)
-            logger.info("monitoring_restarted", user_id=user_id)
-        except Exception as e:
-            logger.error("monitoring_restart_failed", user_id=user_id, error=str(e))
+        import asyncio
+        asyncio.create_task(_do_restart_monitoring(forwarder, user_id))
 
 
 async def sources_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -103,12 +107,26 @@ async def add_source_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return ADD_SOURCE_TEXT
 
 
+async def _delete_previous_bot_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete previous bot message if exists."""
+    last_msg_id = context.user_data.get("last_bot_message")
+    if last_msg_id:
+        try:
+            await update.effective_chat.delete_message(last_msg_id)
+        except Exception:
+            pass
+        context.user_data.pop("last_bot_message", None)
+
+
 async def handle_source_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle text input with channel links - add sources immediately."""
     user = update.effective_user
     text = update.message.text
 
     logger.info("handle_source_text", user_id=user.id)
+
+    # Delete previous bot message to keep chat clean
+    await _delete_previous_bot_message(update, context)
 
     # Parse links from text
     parsed = parse_channel_links(text)
@@ -127,10 +145,11 @@ async def handle_source_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if parse_errors:
             response_parts.append("\n" + "\n".join(parse_errors[:5]))
         response_parts.append("\n\nОтправь ссылки на каналы или нажми «Назад».")
-        await update.message.reply_text(
+        sent = await update.message.reply_text(
             "\n".join(response_parts),
             reply_markup=get_add_source_keyboard(),
         )
+        context.user_data["last_bot_message"] = sent.message_id
         return ADD_SOURCE_TEXT
 
     # Add sources immediately
@@ -162,18 +181,20 @@ async def handle_source_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Restart monitoring with new sources
         if result.success:
-            await _restart_user_monitoring(user.id, context)
+            _restart_user_monitoring(user.id, context)
 
-        await update.message.reply_text(
+        sent = await update.message.reply_text(
             "\n".join(parts),
             reply_markup=get_add_source_keyboard(),
         )
+        context.user_data["last_bot_message"] = sent.message_id
 
     except SourceError as e:
-        await update.message.reply_text(
+        sent = await update.message.reply_text(
             f"❌ Ошибка: {e.user_message}\n\nОтправь ещё ссылки или нажми «Назад».",
             reply_markup=get_add_source_keyboard(),
         )
+        context.user_data["last_bot_message"] = sent.message_id
 
     return ADD_SOURCE_TEXT
 
@@ -216,7 +237,7 @@ async def finish_add_sources(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Restart monitoring with new sources
         if result.success:
-            await _restart_user_monitoring(user.id, context)
+            _restart_user_monitoring(user.id, context)
 
         await query.edit_message_text(
             "\n".join(parts),
@@ -296,7 +317,7 @@ async def handle_source_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Restart monitoring with new sources
         if result.success:
-            await _restart_user_monitoring(user.id, context)
+            _restart_user_monitoring(user.id, context)
 
         await update.message.reply_text(
             "\n".join(parts),
@@ -355,7 +376,9 @@ async def handle_sources_pagination(update: Update, context: ContextTypes.DEFAUL
     return await list_sources(update, context, page=page)
 
 
-async def remove_source_start(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 1) -> int:
+async def remove_source_start(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 1
+) -> int:
     """Start source removal flow with pagination."""
     query = update.callback_query
     await query.answer()
@@ -382,7 +405,9 @@ async def remove_source_start(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await query.edit_message_text(
         f"Выбери источник для удаления ({count}):",
-        reply_markup=get_sources_keyboard(sources, page=page, total_pages=total_pages, for_removal=True),
+        reply_markup=get_sources_keyboard(
+            sources, page=page, total_pages=total_pages, for_removal=True
+        ),
     )
 
     return REMOVE_SOURCE
@@ -442,7 +467,7 @@ async def execute_remove_source(update: Update, context: ContextTypes.DEFAULT_TY
         count = await source_repo.count_by_user(user.id)
 
     # Restart monitoring with updated sources
-    await _restart_user_monitoring(user.id, context)
+    _restart_user_monitoring(user.id, context)
 
     await query.edit_message_text(
         "✅ Источник удалён.",

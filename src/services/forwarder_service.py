@@ -673,6 +673,12 @@ class ForwarderService:
         from pyrogram.enums import MessageEntityType
         from pyrogram.parser.html import HTML
 
+        def filter_entities(entities: list) -> list:
+            """Filter out custom emoji entities (not supported by Bot API)."""
+            if not entities:
+                return []
+            return [e for e in entities if e.type != MessageEntityType.CUSTOM_EMOJI]
+
         # Check if message has complex formatting (blockquote, spoiler) - forward directly
         entities = message.entities or message.caption_entities or []
         has_complex_formatting = any(
@@ -696,10 +702,11 @@ class ForwarderService:
         source_link = self._get_message_link(message)
 
         # Get original text with HTML formatting (preserves links, bold, italic, etc.)
+        # Filter out custom emoji entities - they become regular emoji in text
         if message.text:
-            original_html = HTML.unparse(message.text, message.entities or [])
+            original_html = HTML.unparse(message.text, filter_entities(message.entities))
         elif message.caption:
-            original_html = HTML.unparse(message.caption, message.caption_entities or [])
+            original_html = HTML.unparse(message.caption, filter_entities(message.caption_entities))
         else:
             original_html = ""
 
@@ -851,15 +858,25 @@ class ForwarderService:
         if not self._bot:
             raise ForwardError("Bot not set", "Бот не инициализирован")
 
+        from pyrogram.enums import MessageEntityType
         from pyrogram.parser.html import HTML
+
+        def filter_entities(entities: list) -> list:
+            """Filter out custom emoji entities (not supported by Bot API)."""
+            if not entities:
+                return []
+            return [e for e in entities if e.type != MessageEntityType.CUSTOM_EMOJI]
 
         first_msg = messages[0]
         source_title = first_msg.chat.title or first_msg.chat.username or "Unknown"
         source_link = self._get_message_link(first_msg)
 
         # Build caption with HTML formatting preserved (links, bold, etc.)
+        # Filter out custom emoji entities - they become regular emoji in text
         if first_msg.caption:
-            original_html = HTML.unparse(first_msg.caption, first_msg.caption_entities or [])
+            original_html = HTML.unparse(
+                first_msg.caption, filter_entities(first_msg.caption_entities)
+            )
         else:
             original_html = ""
 
