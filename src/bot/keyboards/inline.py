@@ -1,6 +1,6 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from src.shared.constants import CallbackAction, ITEMS_PER_PAGE
+from src.shared.constants import CallbackAction
 from src.storage.models import Source
 
 
@@ -61,6 +61,7 @@ def get_add_source_keyboard() -> InlineKeyboardMarkup:
 def get_sources_keyboard(
     sources: list[Source],
     page: int = 1,
+    total_pages: int = 1,
     for_removal: bool = False,
 ) -> InlineKeyboardMarkup:
     """
@@ -68,7 +69,8 @@ def get_sources_keyboard(
 
     Args:
         sources: List of sources to display
-        page: Current page number
+        page: Current page number (1-indexed)
+        total_pages: Total number of pages
         for_removal: If True, sources are clickable for removal
 
     Returns:
@@ -87,6 +89,12 @@ def get_sources_keyboard(
             callback_data = f"source:view:{source.id}"
 
         buttons.append([InlineKeyboardButton(label, callback_data=callback_data)])
+
+    # Add pagination if needed
+    if total_pages > 1:
+        pagination_prefix = "sources_remove_page" if for_removal else "sources_page"
+        pagination = get_pagination_keyboard(page, total_pages, pagination_prefix)
+        buttons.append(pagination)
 
     # Add back button
     buttons.append([InlineKeyboardButton("◀️ Назад", callback_data=f"action:{CallbackAction.SOURCES.value}")])

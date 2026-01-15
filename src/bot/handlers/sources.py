@@ -4,8 +4,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
 
 from src.bot.keyboards import (
@@ -16,9 +14,14 @@ from src.bot.keyboards import (
     get_sources_menu_keyboard,
 )
 from src.bot.messages import Messages
-from src.bot.states import ADD_SOURCE_FILE, ADD_SOURCE_TEXT, MAIN_MENU, REMOVE_SOURCE, SOURCES_MENU
+from src.bot.states import ADD_SOURCE_FILE, ADD_SOURCE_TEXT, REMOVE_SOURCE, SOURCES_MENU
 from src.services import ForwarderService, SourceService
-from src.shared.constants import MAX_FILE_SIZE_BYTES, MAX_SOURCES_PER_USER, SUPPORTED_FILE_EXTENSIONS
+from src.shared.constants import (
+    ITEMS_PER_PAGE,
+    MAX_FILE_SIZE_BYTES,
+    MAX_SOURCES_PER_USER,
+    SUPPORTED_FILE_EXTENSIONS,
+)
 from src.shared.exceptions import SourceError
 from src.shared.utils.validators import parse_channel_links
 from src.storage import get_database
@@ -283,8 +286,8 @@ async def handle_source_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ADD_SOURCE_FILE
 
 
-async def list_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show list of sources."""
+async def list_sources(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 1) -> int:
+    """Show list of sources with pagination."""
     query = update.callback_query
     await query.answer()
 
@@ -293,25 +296,39 @@ async def list_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     db = get_database()
     async with db.session() as session:
         source_repo = SourceRepository(session)
-        sources = await source_repo.get_by_user(user.id, limit=20)
+        count = await source_repo.count_by_user(user.id)
 
-    if not sources:
-        await query.edit_message_text(
-            "📭 Список источников пуст.\nДобавь каналы для мониторинга.",
-            reply_markup=get_sources_menu_keyboard(0),
-        )
-        return SOURCES_MENU
+        if count == 0:
+            await query.edit_message_text(
+                "📭 Список источников пуст.\nДобавь каналы для мониторинга.",
+                reply_markup=get_sources_menu_keyboard(0),
+            )
+            return SOURCES_MENU
+
+        total_pages = (count + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+        offset = (page - 1) * ITEMS_PER_PAGE
+        sources = await source_repo.get_by_user(user.id, limit=ITEMS_PER_PAGE, offset=offset)
+
+    context.user_data["sources_page"] = page
 
     await query.edit_message_text(
-        "📺 Твои источники:",
-        reply_markup=get_sources_keyboard(sources),
+        f"📺 Твои источники ({count}):",
+        reply_markup=get_sources_keyboard(sources, page=page, total_pages=total_pages),
     )
 
     return SOURCES_MENU
 
 
-async def remove_source_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Start source removal flow."""
+async def handle_sources_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle pagination in sources list."""
+    query = update.callback_query
+    # Extract page from callback: sources_page:{page}
+    page = int(query.data.split(":")[-1])
+    return await list_sources(update, context, page=page)
+
+
+async def remove_source_start(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 1) -> int:
+    """Start source removal flow with pagination."""
     query = update.callback_query
     await query.answer()
 
@@ -320,21 +337,35 @@ async def remove_source_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     db = get_database()
     async with db.session() as session:
         source_repo = SourceRepository(session)
-        sources = await source_repo.get_by_user(user.id, limit=20)
+        count = await source_repo.count_by_user(user.id)
 
-    if not sources:
-        await query.edit_message_text(
-            "📭 Нет источников для удаления.",
-            reply_markup=get_sources_menu_keyboard(0),
-        )
-        return SOURCES_MENU
+        if count == 0:
+            await query.edit_message_text(
+                "📭 Нет источников для удаления.",
+                reply_markup=get_sources_menu_keyboard(0),
+            )
+            return SOURCES_MENU
+
+        total_pages = (count + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+        offset = (page - 1) * ITEMS_PER_PAGE
+        sources = await source_repo.get_by_user(user.id, limit=ITEMS_PER_PAGE, offset=offset)
+
+    context.user_data["remove_page"] = page
 
     await query.edit_message_text(
-        "Выбери источник для удаления:",
-        reply_markup=get_sources_keyboard(sources, for_removal=True),
+        f"Выбери источник для удаления ({count}):",
+        reply_markup=get_sources_keyboard(sources, page=page, total_pages=total_pages, for_removal=True),
     )
 
     return REMOVE_SOURCE
+
+
+async def handle_remove_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle pagination in source removal list."""
+    query = update.callback_query
+    # Extract page from callback: sources_remove_page:{page}
+    page = int(query.data.split(":")[-1])
+    return await remove_source_start(update, context, page=page)
 
 
 async def confirm_remove_source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -430,7 +461,9 @@ def get_sources_handlers() -> list:
 
         # List and remove
         CallbackQueryHandler(list_sources, pattern="^action:list_sources$"),
+        CallbackQueryHandler(handle_sources_pagination, pattern=r"^sources_page:\d+$"),
         CallbackQueryHandler(remove_source_start, pattern="^action:remove_source$"),
+        CallbackQueryHandler(handle_remove_pagination, pattern=r"^sources_remove_page:\d+$"),
         CallbackQueryHandler(confirm_remove_source, pattern=r"^source:remove:\d+$"),
         CallbackQueryHandler(execute_remove_source, pattern=r"^confirm:remove_source:\d+$"),
 
