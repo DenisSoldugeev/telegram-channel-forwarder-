@@ -8,8 +8,8 @@ from telegram.ext import (
 
 from src.bot.keyboards import (
     get_add_source_keyboard,
+    get_cancel_keyboard,
     get_confirm_keyboard,
-    get_done_cancel_keyboard,
     get_sources_keyboard,
     get_sources_menu_keyboard,
 )
@@ -94,9 +94,6 @@ async def add_source_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return SOURCES_MENU
 
-    # Initialize pending sources list
-    context.user_data["pending_sources"] = []
-
     await query.edit_message_text(
         Messages.ADD_SOURCE_TEXT_PROMPT,
         reply_markup=get_add_source_keyboard(),
@@ -107,7 +104,7 @@ async def add_source_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def handle_source_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle text input with channel links."""
+    """Handle text input with channel links - add sources immediately."""
     user = update.effective_user
     text = update.message.text
 
@@ -116,36 +113,67 @@ async def handle_source_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Parse links from text
     parsed = parse_channel_links(text)
     valid_links = []
-    errors = []
+    parse_errors = []
 
     for original, result in parsed:
         if result.is_valid:
-            # Use original input - it will be re-validated in source_service
             valid_links.append(original)
         else:
-            errors.append(f"• {original}: {result.error}")
+            parse_errors.append(f"• {original}: {result.error}")
 
-    # Add to pending list
-    pending = context.user_data.get("pending_sources", [])
-    pending.extend(valid_links)
-    context.user_data["pending_sources"] = list(set(pending))  # Dedupe
+    if not valid_links:
+        # No valid links found
+        response_parts = ["❌ Не найдено валидных ссылок."]
+        if parse_errors:
+            response_parts.append("\n" + "\n".join(parse_errors[:5]))
+        response_parts.append("\n\nОтправь ссылки на каналы или нажми «Назад».")
+        await update.message.reply_text(
+            "\n".join(response_parts),
+            reply_markup=get_add_source_keyboard(),
+        )
+        return ADD_SOURCE_TEXT
 
-    # Build response
-    response_parts = []
-    if valid_links:
-        response_parts.append(f"✅ Добавлено в очередь: {len(valid_links)}")
-    if errors:
-        response_parts.append("❌ Ошибки:\n" + "\n".join(errors[:5]))  # Show first 5 errors
-        if len(errors) > 5:
-            response_parts.append(f"...и ещё {len(errors) - 5} ошибок")
+    # Add sources immediately
+    try:
+        source_service: SourceService = context.bot_data["source_service"]
+        result = await source_service.add_sources(user.id, valid_links)
 
-    response_parts.append(f"\n📝 Всего в очереди: {len(pending)}")
-    response_parts.append("\nОтправь ещё ссылки или нажми «Готово».")
+        # Build result message
+        parts = []
+        if result.success:
+            parts.append(f"✅ Добавлено ({len(result.success)}):")
+            for src in result.success[:10]:
+                parts.append(f"  • {src.channel_title}")
+            if len(result.success) > 10:
+                parts.append(f"  ...и ещё {len(result.success) - 10}")
 
-    await update.message.reply_text(
-        "\n".join(response_parts),
-        reply_markup=get_done_cancel_keyboard(),
-    )
+        if result.errors:
+            parts.append(f"\n❌ Ошибки ({len(result.errors)}):")
+            for err in result.errors[:5]:
+                parts.append(f"  • {err.link}: {err.reason}")
+            if len(result.errors) > 5:
+                parts.append(f"  ...и ещё {len(result.errors) - 5}")
+
+        if parse_errors:
+            parts.append(f"\n⚠️ Невалидные ссылки ({len(parse_errors)}):")
+            parts.extend(parse_errors[:3])
+
+        parts.append("\n\nОтправь ещё ссылки или нажми «Назад».")
+
+        # Restart monitoring with new sources
+        if result.success:
+            await _restart_user_monitoring(user.id, context)
+
+        await update.message.reply_text(
+            "\n".join(parts),
+            reply_markup=get_add_source_keyboard(),
+        )
+
+    except SourceError as e:
+        await update.message.reply_text(
+            f"❌ Ошибка: {e.user_message}\n\nОтправь ещё ссылки или нажми «Назад».",
+            reply_markup=get_add_source_keyboard(),
+        )
 
     return ADD_SOURCE_TEXT
 
@@ -211,7 +239,7 @@ async def add_source_file_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     await query.edit_message_text(
         Messages.ADD_SOURCE_FILE_PROMPT,
-        reply_markup=get_done_cancel_keyboard(),
+        reply_markup=get_cancel_keyboard(),
     )
 
     return ADD_SOURCE_FILE
@@ -228,7 +256,7 @@ async def handle_source_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if document.file_size > MAX_FILE_SIZE_BYTES:
         await update.message.reply_text(
             Messages.ERR_FILE_TOO_LARGE,
-            reply_markup=get_done_cancel_keyboard(),
+            reply_markup=get_cancel_keyboard(),
         )
         return ADD_SOURCE_FILE
 
@@ -237,7 +265,7 @@ async def handle_source_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if ext not in SUPPORTED_FILE_EXTENSIONS:
         await update.message.reply_text(
             Messages.ERR_UNSUPPORTED_FILE,
-            reply_markup=get_done_cancel_keyboard(),
+            reply_markup=get_cancel_keyboard(),
         )
         return ADD_SOURCE_FILE
 
@@ -281,7 +309,7 @@ async def handle_source_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error("file_processing_error", user_id=user.id, error=str(e))
         await update.message.reply_text(
             f"❌ Ошибка обработки файла: {str(e)}",
-            reply_markup=get_done_cancel_keyboard(),
+            reply_markup=get_cancel_keyboard(),
         )
         return ADD_SOURCE_FILE
 
@@ -457,7 +485,6 @@ def get_sources_handlers() -> list:
         # Add sources
         CallbackQueryHandler(add_source_menu, pattern="^action:add_source$"),
         CallbackQueryHandler(add_source_file_start, pattern="^action:add_source_file$"),
-        CallbackQueryHandler(finish_add_sources, pattern="^action:done$"),
 
         # List and remove
         CallbackQueryHandler(list_sources, pattern="^action:list_sources$"),
