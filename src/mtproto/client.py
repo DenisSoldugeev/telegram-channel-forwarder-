@@ -79,8 +79,13 @@ class MTProtoClient:
 
     async def disconnect(self) -> None:
         """Disconnect from Telegram."""
-        if self._client and self.is_connected:
-            await self._client.disconnect()
+        if self._client:
+            try:
+                if self._client.is_initialized and self._client.is_connected:
+                    await self._client.disconnect()
+            except ConnectionError:
+                # Client not properly initialized or already disconnected
+                pass
 
     async def send_code(self, phone: str) -> dict:
         """
