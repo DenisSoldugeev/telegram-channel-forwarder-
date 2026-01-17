@@ -150,14 +150,15 @@ class ForwarderService:
             user_id=user_id,
         )
 
-        # Add channels to monitor
+        # Add channels to monitor (ensure full format -100xxx is added)
         for source in sources:
             handler.add_channel(source.channel_id)
+            # Also add the resolved chat.id if different (will be resolved later in source_state)
 
         logger.info(
             "channels_added_to_handler",
             user_id=user_id,
-            source_ids=source_ids,
+            source_channel_ids=[s.channel_id for s in sources],
             monitored_channels=list(handler._monitored_channels),
         )
 
@@ -183,8 +184,16 @@ class ForwarderService:
         for source in sources:
             # Get current last message to start from
             try:
-                # Try username first (more reliable), then channel_id
-                chat_identifier = source.channel_username or source.channel_id
+                # Try username first, then full channel_id with -100 prefix
+                chat_identifier = source.channel_username
+                if not chat_identifier:
+                    # Ensure we use the full format for numeric IDs
+                    channel_str = str(source.channel_id)
+                    if not channel_str.startswith("-100") and not channel_str.startswith("-"):
+                        # Raw ID without prefix, add -100
+                        chat_identifier = int(f"-100{source.channel_id}")
+                    else:
+                        chat_identifier = source.channel_id
 
                 logger.info(
                     "resolving_channel",
@@ -195,6 +204,17 @@ class ForwarderService:
                 )
 
                 chat = await client.client.get_chat(chat_identifier)
+
+                # IMPORTANT: Add resolved chat.id to monitored channels
+                # The chat.id from Pyrogram is what we'll receive in messages
+                if chat.id not in handler._monitored_channels:
+                    handler.add_channel(chat.id)
+                    logger.info(
+                        "added_resolved_chat_id",
+                        user_id=user_id,
+                        original_channel_id=source.channel_id,
+                        resolved_chat_id=chat.id,
+                    )
 
                 # Get latest message ID to not process old messages
                 async for msg in client.client.get_chat_history(chat.id, limit=1):
@@ -214,6 +234,7 @@ class ForwarderService:
                     "source_initialized",
                     user_id=user_id,
                     channel_id=source.channel_id,
+                    resolved_chat_id=chat.id,
                     chat_title=chat.title,
                     last_msg_id=source_state[source.channel_id]['last_msg_id'],
                 )
@@ -829,11 +850,12 @@ class ForwarderService:
                 sticker=sticker_data,
             )
         else:
-            # Text message or unsupported type - send as text (with link preview enabled)
+            # Text message or unsupported type - send as text
             result = await self._bot.send_message(
                 chat_id=user_id,
                 text=caption,
                 parse_mode="HTML",
+                disable_web_page_preview=True,
             )
 
         return result.message_id
@@ -955,6 +977,7 @@ class ForwarderService:
                 chat_id=user_id,
                 text=caption,
                 parse_mode="HTML",
+                disable_web_page_preview=True,
             )
             return result.message_id
 
@@ -997,26 +1020,34 @@ class ForwarderService:
         if channel_str.startswith("-100"):
             normalized_id = int(channel_str[4:])
 
-        logger.debug(
-            "get_source_id",
+        # Also try with -100 prefix if not present
+        full_id = channel_id
+        if not channel_str.startswith("-100") and not channel_str.startswith("-"):
+            full_id = int(f"-100{channel_id}")
+
+        logger.info(
+            "get_source_id_lookup",
             user_id=user_id,
             original_channel_id=channel_id,
             normalized_id=normalized_id,
+            full_id=full_id,
         )
 
         async with self._db.session() as session:
             source_repo = SourceRepository(session)
-            # Try normalized ID first
-            source = await source_repo.get_by_channel(user_id, normalized_id)
-            if not source:
-                # Try original ID (in case DB stores full format)
-                source = await source_repo.get_by_channel(user_id, channel_id)
+            # Try all possible formats
+            source = await source_repo.get_by_channel(user_id, channel_id)
+            if not source and normalized_id != channel_id:
+                source = await source_repo.get_by_channel(user_id, normalized_id)
+            if not source and full_id != channel_id:
+                source = await source_repo.get_by_channel(user_id, full_id)
 
-            logger.debug(
+            logger.info(
                 "get_source_id_result",
                 user_id=user_id,
                 found=source is not None,
                 source_id=source.id if source else None,
+                source_channel_id=source.channel_id if source else None,
             )
             return source.id if source else None
 
