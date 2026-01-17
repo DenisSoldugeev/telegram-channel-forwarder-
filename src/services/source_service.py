@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 
 import structlog
+from pyrogram.enums import ChatType
 from pyrogram.types import Chat
 
 from src.mtproto.client import MTProtoClient, MTProtoClientManager
@@ -123,6 +124,13 @@ class SourceService:
                         )
                         continue
 
+                    # Check that it's a channel or supergroup, not a bot/user
+                    if chat.type not in (ChatType.CHANNEL, ChatType.SUPERGROUP):
+                        result.errors.append(
+                            SourceAddError(link, f"Это не канал (тип: {chat.type.name})")
+                        )
+                        continue
+
                     # Check if already added
                     async with self._db.session() as session:
                         source_repo = SourceRepository(session)
@@ -141,19 +149,24 @@ class SourceService:
                                 current_count += 1
                             continue
 
-                        # Add new source
+                        # Add new source with fallback for title
+                        channel_title = (
+                            chat.title
+                            or chat.username
+                            or f"Channel {chat.id}"
+                        )
                         logger.info(
                             "adding_source",
                             user_id=user_id,
                             channel_id=chat.id,
                             channel_username=chat.username,
-                            channel_title=chat.title,
+                            channel_title=channel_title,
                         )
                         source = await source_repo.add_source(
                             user_id=user_id,
                             channel_id=chat.id,
                             channel_username=chat.username,
-                            channel_title=chat.title,
+                            channel_title=channel_title,
                         )
                         result.success.append(source)
                         current_count += 1
