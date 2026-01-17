@@ -147,11 +147,20 @@ class ForwarderService:
             on_message=lambda msg: self._handle_message(user_id, msg, target),
             on_media_group=lambda msgs: self._handle_media_group(user_id, msgs, target),
             media_group_timeout=settings.media_group_timeout,
+            user_id=user_id,
         )
 
-        # Add channels to monitor
+        # Add channels to monitor (ensure full format -100xxx is added)
         for source in sources:
             handler.add_channel(source.channel_id)
+            # Also add the resolved chat.id if different (will be resolved later in source_state)
+
+        logger.info(
+            "channels_added_to_handler",
+            user_id=user_id,
+            source_channel_ids=[s.channel_id for s in sources],
+            monitored_channels=list(handler._monitored_channels),
+        )
 
         # Start Pyrogram client
         if not client.client.is_initialized:
@@ -175,8 +184,16 @@ class ForwarderService:
         for source in sources:
             # Get current last message to start from
             try:
-                # Try username first (more reliable), then channel_id
-                chat_identifier = source.channel_username or source.channel_id
+                # Try username first, then full channel_id with -100 prefix
+                chat_identifier = source.channel_username
+                if not chat_identifier:
+                    # Ensure we use the full format for numeric IDs
+                    channel_str = str(source.channel_id)
+                    if not channel_str.startswith("-100") and not channel_str.startswith("-"):
+                        # Raw ID without prefix, add -100
+                        chat_identifier = int(f"-100{source.channel_id}")
+                    else:
+                        chat_identifier = source.channel_id
 
                 logger.info(
                     "resolving_channel",
@@ -187,6 +204,17 @@ class ForwarderService:
                 )
 
                 chat = await client.client.get_chat(chat_identifier)
+
+                # IMPORTANT: Add resolved chat.id to monitored channels
+                # The chat.id from Pyrogram is what we'll receive in messages
+                if chat.id not in handler._monitored_channels:
+                    handler.add_channel(chat.id)
+                    logger.info(
+                        "added_resolved_chat_id",
+                        user_id=user_id,
+                        original_channel_id=source.channel_id,
+                        resolved_chat_id=chat.id,
+                    )
 
                 # Get latest message ID to not process old messages
                 async for msg in client.client.get_chat_history(chat.id, limit=1):
@@ -206,6 +234,7 @@ class ForwarderService:
                     "source_initialized",
                     user_id=user_id,
                     channel_id=source.channel_id,
+                    resolved_chat_id=chat.id,
                     chat_title=chat.title,
                     last_msg_id=source_state[source.channel_id]['last_msg_id'],
                 )
@@ -324,11 +353,13 @@ class ForwarderService:
 
     def _check_keyword_filter(self, message: Message) -> bool:
         """
-        Check if message passes keyword filter.
+        Check if message passes keyword filter using whole word matching.
 
         Returns:
             True if message should be forwarded, False if filtered out.
         """
+        import re
+
         keywords = settings.filter_keywords
         if not keywords:
             # No filter configured - forward all
@@ -340,13 +371,33 @@ class ForwarderService:
             # No text to check - in whitelist mode skip, in blacklist mode allow
             return settings.filter_mode == "blacklist"
 
-        # Prepare text for matching
-        if not settings.filter_case_sensitive:
-            text = text.lower()
-            keywords = [kw.lower() for kw in keywords]
+        # Set regex flags
+        flags = 0 if settings.filter_case_sensitive else re.IGNORECASE
+
+        def matches_keyword(kw: str) -> bool:
+            """Check if keyword matches as a whole word."""
+            escaped_kw = re.escape(kw)
+
+            if kw.startswith("#"):
+                # For hashtags: match #tag at start of text or after whitespace
+                pattern = r"(?:^|(?<=\s))" + escaped_kw + r"(?=\s|$)"
+            else:
+                # For regular words: use word boundaries
+                pattern = r"\b" + escaped_kw + r"\b"
+
+            return bool(re.search(pattern, text, flags))
 
         # Check for keyword matches
-        has_match = any(kw in text for kw in keywords)
+        has_match = any(matches_keyword(kw) for kw in keywords)
+
+        if has_match:
+            # Log which keyword matched for debugging
+            matched_kw = next((kw for kw in keywords if matches_keyword(kw)), None)
+            logger.debug(
+                "keyword_matched",
+                keyword=matched_kw,
+                message_id=message.id,
+            )
 
         if settings.filter_mode == "whitelist":
             # Whitelist: forward only if matches
@@ -640,16 +691,51 @@ class ForwarderService:
         if not self._bot:
             raise ForwardError("Bot not set", "Бот не инициализирован")
 
-        # Build caption with source info
+        from pyrogram.enums import MessageEntityType
+        from pyrogram.parser.html import HTML
+
+        def filter_entities(entities: list) -> list:
+            """Filter out custom emoji entities (not supported by Bot API)."""
+            if not entities:
+                return []
+            return [e for e in entities if e.type != MessageEntityType.CUSTOM_EMOJI]
+
+        # Check if message has complex formatting (blockquote, spoiler) - forward directly
+        entities = message.entities or message.caption_entities or []
+        has_complex_formatting = any(
+            e.type in (MessageEntityType.BLOCKQUOTE, MessageEntityType.SPOILER)
+            for e in entities
+        )
+
+        if has_complex_formatting:
+            # Forward directly to preserve complex formatting
+            forwarded = await client.client.forward_messages(
+                chat_id=user_id,
+                from_chat_id=message.chat.id,
+                message_ids=message.id,
+            )
+            result = forwarded if not isinstance(forwarded, list) else forwarded[0]
+            return result.id
+
+        # Build caption with source info, preserving original formatting (links, bold, etc.)
+
         source_title = message.chat.title or message.chat.username or "Unknown"
         source_link = self._get_message_link(message)
 
-        original_text = message.text or message.caption or ""
+        # Get original text with HTML formatting (preserves links, bold, italic, etc.)
+        # Filter out custom emoji entities - they become regular emoji in text
+        if message.text:
+            original_html = HTML.unparse(message.text, filter_entities(message.entities))
+        elif message.caption:
+            original_html = HTML.unparse(message.caption, filter_entities(message.caption_entities))
+        else:
+            original_html = ""
+
         header = f"📢 <b>{source_title}</b>"
         if source_link:
             header += f" • <a href=\"{source_link}\">Оригинал</a>"
 
-        caption = f"{header}\n\n{original_text}" if original_text else header
+        caption = f"{header}\n\n{original_html}" if original_html else header
 
         # Check file size - if too large, send text only
         file_size = self._get_media_size(message)
@@ -676,7 +762,8 @@ class ForwarderService:
             return result.message_id
 
         # Truncate caption if too long (Telegram limit is 1024 for media, 4096 for text)
-        max_caption_len = 1024 if (message.photo or message.video or message.document or message.animation) else 4096
+        has_media = message.photo or message.video or message.document or message.animation or message.audio
+        max_caption_len = 1024 if has_media else 4096
         if len(caption) > max_caption_len:
             caption = caption[:max_caption_len - 3] + "..."
 
@@ -738,47 +825,21 @@ class ForwarderService:
                 parse_mode="HTML",
             )
         elif message.voice:
-            # Download voice to memory - may fail due to privacy settings
-            try:
-                voice_bytes = await client.client.download_media(message, in_memory=True)
-                voice_data = BytesIO(voice_bytes.getvalue() if hasattr(voice_bytes, 'getvalue') else voice_bytes)
-
-                result = await self._bot.send_voice(
-                    chat_id=user_id,
-                    voice=voice_data,
-                    caption=caption,
-                    parse_mode="HTML",
-                )
-            except Exception as e:
-                logger.warning("voice_send_failed", user_id=user_id, error=str(e))
-                # Fallback to link
-                caption += "\n\n🎤 Голосовое сообщение — перейдите по ссылке для прослушивания."
-                result = await self._bot.send_message(
-                    chat_id=user_id,
-                    text=caption,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
+            # Forward voice messages directly (keeps "Forwarded from" label but works reliably)
+            forwarded = await client.client.forward_messages(
+                chat_id=user_id,
+                from_chat_id=message.chat.id,
+                message_ids=message.id,
+            )
+            result = forwarded if not isinstance(forwarded, list) else forwarded[0]
         elif message.video_note:
-            # Video notes may fail due to privacy settings
-            try:
-                vnote_bytes = await client.client.download_media(message, in_memory=True)
-                vnote_data = BytesIO(vnote_bytes.getvalue() if hasattr(vnote_bytes, 'getvalue') else vnote_bytes)
-
-                result = await self._bot.send_video_note(
-                    chat_id=user_id,
-                    video_note=vnote_data,
-                )
-            except Exception as e:
-                logger.warning("video_note_send_failed", user_id=user_id, error=str(e))
-                # Fallback to link
-                fallback_text = f"{header}\n\n🔵 Видеокружок — перейдите по ссылке для просмотра."
-                result = await self._bot.send_message(
-                    chat_id=user_id,
-                    text=fallback_text,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
+            # Forward video notes directly (keeps "Forwarded from" label but works reliably)
+            forwarded = await client.client.forward_messages(
+                chat_id=user_id,
+                from_chat_id=message.chat.id,
+                message_ids=message.id,
+            )
+            result = forwarded if not isinstance(forwarded, list) else forwarded[0]
         elif message.sticker:
             # Download sticker to memory
             sticker_bytes = await client.client.download_media(message, in_memory=True)
@@ -819,17 +880,33 @@ class ForwarderService:
         if not self._bot:
             raise ForwardError("Bot not set", "Бот не инициализирован")
 
+        from pyrogram.enums import MessageEntityType
+        from pyrogram.parser.html import HTML
+
+        def filter_entities(entities: list) -> list:
+            """Filter out custom emoji entities (not supported by Bot API)."""
+            if not entities:
+                return []
+            return [e for e in entities if e.type != MessageEntityType.CUSTOM_EMOJI]
+
         first_msg = messages[0]
         source_title = first_msg.chat.title or first_msg.chat.username or "Unknown"
         source_link = self._get_message_link(first_msg)
 
-        # Build caption for first media item
-        original_caption = first_msg.caption or ""
+        # Build caption with HTML formatting preserved (links, bold, etc.)
+        # Filter out custom emoji entities - they become regular emoji in text
+        if first_msg.caption:
+            original_html = HTML.unparse(
+                first_msg.caption, filter_entities(first_msg.caption_entities)
+            )
+        else:
+            original_html = ""
+
         header = f"📢 <b>{source_title}</b>"
         if source_link:
             header += f" • <a href=\"{source_link}\">Оригинал</a>"
 
-        caption = f"{header}\n\n{original_caption}" if original_caption else header
+        caption = f"{header}\n\n{original_html}" if original_html else header
 
         # Check total size of album
         total_size = sum(self._get_media_size(msg) or 0 for msg in messages)
@@ -900,6 +977,7 @@ class ForwarderService:
                 chat_id=user_id,
                 text=caption,
                 parse_mode="HTML",
+                disable_web_page_preview=True,
             )
             return result.message_id
 
@@ -942,26 +1020,34 @@ class ForwarderService:
         if channel_str.startswith("-100"):
             normalized_id = int(channel_str[4:])
 
-        logger.debug(
-            "get_source_id",
+        # Also try with -100 prefix if not present
+        full_id = channel_id
+        if not channel_str.startswith("-100") and not channel_str.startswith("-"):
+            full_id = int(f"-100{channel_id}")
+
+        logger.info(
+            "get_source_id_lookup",
             user_id=user_id,
             original_channel_id=channel_id,
             normalized_id=normalized_id,
+            full_id=full_id,
         )
 
         async with self._db.session() as session:
             source_repo = SourceRepository(session)
-            # Try normalized ID first
-            source = await source_repo.get_by_channel(user_id, normalized_id)
-            if not source:
-                # Try original ID (in case DB stores full format)
-                source = await source_repo.get_by_channel(user_id, channel_id)
+            # Try all possible formats
+            source = await source_repo.get_by_channel(user_id, channel_id)
+            if not source and normalized_id != channel_id:
+                source = await source_repo.get_by_channel(user_id, normalized_id)
+            if not source and full_id != channel_id:
+                source = await source_repo.get_by_channel(user_id, full_id)
 
-            logger.debug(
+            logger.info(
                 "get_source_id_result",
                 user_id=user_id,
                 found=source is not None,
                 source_id=source.id if source else None,
+                source_channel_id=source.channel_id if source else None,
             )
             return source.id if source else None
 

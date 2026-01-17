@@ -1,6 +1,6 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from src.shared.constants import CallbackAction, ITEMS_PER_PAGE
+from src.shared.constants import CallbackAction
 from src.storage.models import Source
 
 
@@ -9,6 +9,24 @@ def get_start_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔐 Начать авторизацию", callback_data=f"action:{CallbackAction.REAUTH.value}")],
         [InlineKeyboardButton("❓ Как это работает?", callback_data="action:help")],
+    ])
+
+
+def get_auth_method_keyboard() -> InlineKeyboardMarkup:
+    """Get keyboard for choosing auth method."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📱 QR-код (рекомендуется)", callback_data="action:auth_qr")],
+        [InlineKeyboardButton("📞 По номеру телефона", callback_data="action:auth_phone")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"action:{CallbackAction.CANCEL.value}")],
+    ])
+
+
+def get_qr_auth_keyboard() -> InlineKeyboardMarkup:
+    """Get keyboard for QR auth state."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Обновить QR", callback_data="action:refresh_qr")],
+        [InlineKeyboardButton("✅ Я отсканировал", callback_data="action:check_qr")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"action:{CallbackAction.CANCEL.value}")],
     ])
 
 
@@ -36,13 +54,14 @@ def get_add_source_keyboard() -> InlineKeyboardMarkup:
     """Get keyboard for adding sources (text input mode)."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📄 Загрузить файл", callback_data=f"action:{CallbackAction.ADD_SOURCE_FILE.value}")],
-        [InlineKeyboardButton("❌ Отмена", callback_data=f"action:{CallbackAction.CANCEL.value}")],
+        [InlineKeyboardButton("◀️ Назад", callback_data=f"action:{CallbackAction.SOURCES.value}")],
     ])
 
 
 def get_sources_keyboard(
     sources: list[Source],
     page: int = 1,
+    total_pages: int = 1,
     for_removal: bool = False,
 ) -> InlineKeyboardMarkup:
     """
@@ -50,7 +69,8 @@ def get_sources_keyboard(
 
     Args:
         sources: List of sources to display
-        page: Current page number
+        page: Current page number (1-indexed)
+        total_pages: Total number of pages
         for_removal: If True, sources are clickable for removal
 
     Returns:
@@ -69,6 +89,12 @@ def get_sources_keyboard(
             callback_data = f"source:view:{source.id}"
 
         buttons.append([InlineKeyboardButton(label, callback_data=callback_data)])
+
+    # Add pagination if needed
+    if total_pages > 1:
+        pagination_prefix = "sources_remove_page" if for_removal else "sources_page"
+        pagination = get_pagination_keyboard(page, total_pages, pagination_prefix)
+        buttons.append(pagination)
 
     # Add back button
     buttons.append([InlineKeyboardButton("◀️ Назад", callback_data=f"action:{CallbackAction.SOURCES.value}")])

@@ -1,6 +1,7 @@
 import pytest
 
 from src.shared.utils.validators import (
+    ChannelIdentifierType,
     normalize_phone,
     parse_channel_link,
     parse_channel_links,
@@ -91,14 +92,29 @@ class TestValidateChannelLink:
         assert result.is_valid is True
         assert result.username == "channel123"
 
-    def test_invalid_private_link(self):
+    def test_valid_private_invite_link(self):
         result = validate_channel_link("https://t.me/+abc123")
-        assert result.is_valid is False
-        assert "private" in result.error.lower()
+        assert result.is_valid is True
+        assert result.identifier_type == ChannelIdentifierType.INVITE_LINK
+        assert result.invite_link == "https://t.me/+abc123"
 
-    def test_invalid_joinchat_link(self):
+    def test_valid_joinchat_link(self):
         result = validate_channel_link("https://t.me/joinchat/abc123")
-        assert result.is_valid is False
+        assert result.is_valid is True
+        assert result.identifier_type == ChannelIdentifierType.INVITE_LINK
+        assert result.invite_link == "https://t.me/+abc123"
+
+    def test_valid_channel_id_positive(self):
+        result = validate_channel_link("1234567890")
+        assert result.is_valid is True
+        assert result.identifier_type == ChannelIdentifierType.CHANNEL_ID
+        assert result.channel_id == -1001234567890
+
+    def test_valid_channel_id_with_prefix(self):
+        result = validate_channel_link("-1001234567890")
+        assert result.is_valid is True
+        assert result.identifier_type == ChannelIdentifierType.CHANNEL_ID
+        assert result.channel_id == -1001234567890
 
     def test_invalid_short_username(self):
         result = validate_channel_link("@ab")
@@ -116,7 +132,7 @@ class TestParseChannelLink:
         assert parse_channel_link("https://t.me/durov") == "durov"
 
     def test_returns_none_for_invalid(self):
-        assert parse_channel_link("invalid") is None
+        assert parse_channel_link("@ab") is None  # Too short
 
 
 class TestParseChannelLinks:
@@ -133,13 +149,13 @@ class TestParseChannelLinks:
 
     def test_handles_mixed_valid_invalid(self):
         text = """https://t.me/valid
-        invalid_link_here
+        @ab
         @valid2"""
 
         results = parse_channel_links(text)
         assert len(results) == 3
         assert results[0][1].is_valid is True
-        assert results[1][1].is_valid is False
+        assert results[1][1].is_valid is False  # @ab is too short
         assert results[2][1].is_valid is True
 
     def test_handles_empty_lines(self):

@@ -121,6 +121,7 @@ class MessageHandler:
         on_message: Callable[[Message], None],
         on_media_group: Callable[[list[Message]], None],
         media_group_timeout: float = 2.0,
+        user_id: int | None = None,
     ):
         """
         Initialize handler.
@@ -129,11 +130,13 @@ class MessageHandler:
             on_message: Callback for single messages
             on_media_group: Callback for media groups
             media_group_timeout: Timeout for collecting media groups
+            user_id: User ID for logging
         """
         self._on_message = on_message
         self._on_media_group = on_media_group
         self._media_collector = MediaGroupCollector(timeout=media_group_timeout)
         self._monitored_channels: set[int] = set()
+        self._user_id = user_id
 
     def add_channel(self, channel_id: int) -> None:
         """Add channel to monitor (stores both raw and full format)."""
@@ -147,6 +150,14 @@ class MessageHandler:
             # Raw format, build full
             raw_id = channel_id
             full_id = int(f"-100{channel_id}")
+
+        logger.info(
+            "add_channel",
+            user_id=self._user_id,
+            input_id=channel_id,
+            raw_id=raw_id,
+            full_id=full_id,
+        )
 
         # Store both formats for compatibility
         self._monitored_channels.add(raw_id)
@@ -177,6 +188,7 @@ class MessageHandler:
         # Log ALL incoming messages for debugging
         logger.info(
             "incoming_message",
+            user_id=self._user_id,
             chat_id=message.chat.id,
             chat_title=getattr(message.chat, "title", None),
             message_id=message.id,
@@ -185,7 +197,11 @@ class MessageHandler:
 
         # Check if we're monitoring this channel
         if message.chat.id not in self._monitored_channels:
-            logger.debug("skipping_unmonitored", chat_id=message.chat.id)
+            logger.debug(
+                "skipping_unmonitored",
+                user_id=self._user_id,
+                chat_id=message.chat.id,
+            )
             return
 
         logger.info(

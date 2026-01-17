@@ -5,9 +5,11 @@ class BotState(str, Enum):
     """FSM states for bot conversation."""
 
     IDLE = "idle"
+    AUTH_METHOD_CHOICE = "auth_method_choice"
     AWAITING_PHONE = "awaiting_phone"
     AWAITING_CODE = "awaiting_code"
     AWAITING_2FA = "awaiting_2fa"
+    AWAITING_QR = "awaiting_qr"
     AUTHORIZED = "authorized"
     MAIN_MENU = "main_menu"
     SOURCES_MENU = "sources_menu"
@@ -79,3 +81,9 @@ CHANNEL_LINK_PATTERN = (
 )
 CHANNEL_USERNAME_PATTERN = r"^@?(?P<username>[a-zA-Z][a-zA-Z0-9_]{3,31})$"
 PHONE_PATTERN = r"^\+\d{10,15}$"
+
+# Private channel patterns
+CHANNEL_ID_PATTERN = r"^-?(?P<channel_id>\d{10,14})$"
+CHANNEL_INVITE_PATTERN = (
+    r"(?:https?://)?(?:t\.me|telegram\.me)/(?:\+|joinchat/)(?P<invite_hash>[a-zA-Z0-9_-]+)"
+)

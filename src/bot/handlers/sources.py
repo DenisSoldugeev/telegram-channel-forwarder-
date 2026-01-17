@@ -4,21 +4,24 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
 
 from src.bot.keyboards import (
     get_add_source_keyboard,
+    get_cancel_keyboard,
     get_confirm_keyboard,
-    get_done_cancel_keyboard,
     get_sources_keyboard,
     get_sources_menu_keyboard,
 )
 from src.bot.messages import Messages
-from src.bot.states import ADD_SOURCE_FILE, ADD_SOURCE_TEXT, MAIN_MENU, REMOVE_SOURCE, SOURCES_MENU
+from src.bot.states import ADD_SOURCE_FILE, ADD_SOURCE_TEXT, REMOVE_SOURCE, SOURCES_MENU
 from src.services import ForwarderService, SourceService
-from src.shared.constants import MAX_FILE_SIZE_BYTES, MAX_SOURCES_PER_USER, SUPPORTED_FILE_EXTENSIONS
+from src.shared.constants import (
+    ITEMS_PER_PAGE,
+    MAX_FILE_SIZE_BYTES,
+    MAX_SOURCES_PER_USER,
+    SUPPORTED_FILE_EXTENSIONS,
+)
 from src.shared.exceptions import SourceError
 from src.shared.utils.validators import parse_channel_links
 from src.storage import get_database
@@ -27,21 +30,25 @@ from src.storage.repositories import SourceRepository
 logger = structlog.get_logger()
 
 
-async def _restart_user_monitoring(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Restart monitoring for user after source changes."""
+async def _do_restart_monitoring(forwarder: ForwarderService, user_id: int) -> None:
+    """Actually restart monitoring (runs in background)."""
+    try:
+        await forwarder.stop_user_monitoring(user_id)
+    except Exception:
+        pass
+    try:
+        await forwarder.start_user_monitoring(user_id)
+        logger.info("monitoring_restarted", user_id=user_id)
+    except Exception as e:
+        logger.error("monitoring_restart_failed", user_id=user_id, error=str(e))
+
+
+def _restart_user_monitoring(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Schedule monitoring restart in background (non-blocking)."""
     forwarder: ForwarderService = context.bot_data.get("forwarder_service")
     if forwarder:
-        try:
-            # Stop existing monitoring if running
-            await forwarder.stop_user_monitoring(user_id)
-        except Exception:
-            pass
-        try:
-            # Start fresh monitoring
-            await forwarder.start_user_monitoring(user_id)
-            logger.info("monitoring_restarted", user_id=user_id)
-        except Exception as e:
-            logger.error("monitoring_restart_failed", user_id=user_id, error=str(e))
+        import asyncio
+        asyncio.create_task(_do_restart_monitoring(forwarder, user_id))
 
 
 async def sources_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -91,9 +98,6 @@ async def add_source_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return SOURCES_MENU
 
-    # Initialize pending sources list
-    context.user_data["pending_sources"] = []
-
     await query.edit_message_text(
         Messages.ADD_SOURCE_TEXT_PROMPT,
         reply_markup=get_add_source_keyboard(),
@@ -103,45 +107,94 @@ async def add_source_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return ADD_SOURCE_TEXT
 
 
+async def _delete_previous_bot_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete previous bot message if exists."""
+    last_msg_id = context.user_data.get("last_bot_message")
+    if last_msg_id:
+        try:
+            await update.effective_chat.delete_message(last_msg_id)
+        except Exception:
+            pass
+        context.user_data.pop("last_bot_message", None)
+
+
 async def handle_source_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle text input with channel links."""
+    """Handle text input with channel links - add sources immediately."""
     user = update.effective_user
     text = update.message.text
 
     logger.info("handle_source_text", user_id=user.id)
 
+    # Delete previous bot message to keep chat clean
+    await _delete_previous_bot_message(update, context)
+
     # Parse links from text
     parsed = parse_channel_links(text)
     valid_links = []
-    errors = []
+    parse_errors = []
 
     for original, result in parsed:
         if result.is_valid:
-            valid_links.append(result.username)
+            valid_links.append(original)
         else:
-            errors.append(f"• {original}: {result.error}")
+            parse_errors.append(f"• {original}: {result.error}")
 
-    # Add to pending list
-    pending = context.user_data.get("pending_sources", [])
-    pending.extend(valid_links)
-    context.user_data["pending_sources"] = list(set(pending))  # Dedupe
+    if not valid_links:
+        # No valid links found
+        response_parts = ["❌ Не найдено валидных ссылок."]
+        if parse_errors:
+            response_parts.append("\n" + "\n".join(parse_errors[:5]))
+        response_parts.append("\n\nОтправь ссылки на каналы или нажми «Назад».")
+        sent = await update.message.reply_text(
+            "\n".join(response_parts),
+            reply_markup=get_add_source_keyboard(),
+        )
+        context.user_data["last_bot_message"] = sent.message_id
+        return ADD_SOURCE_TEXT
 
-    # Build response
-    response_parts = []
-    if valid_links:
-        response_parts.append(f"✅ Добавлено в очередь: {len(valid_links)}")
-    if errors:
-        response_parts.append("❌ Ошибки:\n" + "\n".join(errors[:5]))  # Show first 5 errors
-        if len(errors) > 5:
-            response_parts.append(f"...и ещё {len(errors) - 5} ошибок")
+    # Add sources immediately
+    try:
+        source_service: SourceService = context.bot_data["source_service"]
+        result = await source_service.add_sources(user.id, valid_links)
 
-    response_parts.append(f"\n📝 Всего в очереди: {len(pending)}")
-    response_parts.append("\nОтправь ещё ссылки или нажми «Готово».")
+        # Build result message
+        parts = []
+        if result.success:
+            parts.append(f"✅ Добавлено ({len(result.success)}):")
+            for src in result.success[:10]:
+                parts.append(f"  • {src.channel_title}")
+            if len(result.success) > 10:
+                parts.append(f"  ...и ещё {len(result.success) - 10}")
 
-    await update.message.reply_text(
-        "\n".join(response_parts),
-        reply_markup=get_done_cancel_keyboard(),
-    )
+        if result.errors:
+            parts.append(f"\n❌ Ошибки ({len(result.errors)}):")
+            for err in result.errors[:5]:
+                parts.append(f"  • {err.link}: {err.reason}")
+            if len(result.errors) > 5:
+                parts.append(f"  ...и ещё {len(result.errors) - 5}")
+
+        if parse_errors:
+            parts.append(f"\n⚠️ Невалидные ссылки ({len(parse_errors)}):")
+            parts.extend(parse_errors[:3])
+
+        parts.append("\n\nОтправь ещё ссылки или нажми «Назад».")
+
+        # Restart monitoring with new sources
+        if result.success:
+            _restart_user_monitoring(user.id, context)
+
+        sent = await update.message.reply_text(
+            "\n".join(parts),
+            reply_markup=get_add_source_keyboard(),
+        )
+        context.user_data["last_bot_message"] = sent.message_id
+
+    except SourceError as e:
+        sent = await update.message.reply_text(
+            f"❌ Ошибка: {e.user_message}\n\nОтправь ещё ссылки или нажми «Назад».",
+            reply_markup=get_add_source_keyboard(),
+        )
+        context.user_data["last_bot_message"] = sent.message_id
 
     return ADD_SOURCE_TEXT
 
@@ -184,7 +237,7 @@ async def finish_add_sources(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Restart monitoring with new sources
         if result.success:
-            await _restart_user_monitoring(user.id, context)
+            _restart_user_monitoring(user.id, context)
 
         await query.edit_message_text(
             "\n".join(parts),
@@ -207,7 +260,7 @@ async def add_source_file_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     await query.edit_message_text(
         Messages.ADD_SOURCE_FILE_PROMPT,
-        reply_markup=get_done_cancel_keyboard(),
+        reply_markup=get_cancel_keyboard(),
     )
 
     return ADD_SOURCE_FILE
@@ -224,7 +277,7 @@ async def handle_source_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if document.file_size > MAX_FILE_SIZE_BYTES:
         await update.message.reply_text(
             Messages.ERR_FILE_TOO_LARGE,
-            reply_markup=get_done_cancel_keyboard(),
+            reply_markup=get_cancel_keyboard(),
         )
         return ADD_SOURCE_FILE
 
@@ -233,7 +286,7 @@ async def handle_source_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if ext not in SUPPORTED_FILE_EXTENSIONS:
         await update.message.reply_text(
             Messages.ERR_UNSUPPORTED_FILE,
-            reply_markup=get_done_cancel_keyboard(),
+            reply_markup=get_cancel_keyboard(),
         )
         return ADD_SOURCE_FILE
 
@@ -264,7 +317,7 @@ async def handle_source_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Restart monitoring with new sources
         if result.success:
-            await _restart_user_monitoring(user.id, context)
+            _restart_user_monitoring(user.id, context)
 
         await update.message.reply_text(
             "\n".join(parts),
@@ -277,13 +330,13 @@ async def handle_source_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error("file_processing_error", user_id=user.id, error=str(e))
         await update.message.reply_text(
             f"❌ Ошибка обработки файла: {str(e)}",
-            reply_markup=get_done_cancel_keyboard(),
+            reply_markup=get_cancel_keyboard(),
         )
         return ADD_SOURCE_FILE
 
 
-async def list_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show list of sources."""
+async def list_sources(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 1) -> int:
+    """Show list of sources with pagination."""
     query = update.callback_query
     await query.answer()
 
@@ -292,25 +345,41 @@ async def list_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     db = get_database()
     async with db.session() as session:
         source_repo = SourceRepository(session)
-        sources = await source_repo.get_by_user(user.id, limit=20)
+        count = await source_repo.count_by_user(user.id)
 
-    if not sources:
-        await query.edit_message_text(
-            "📭 Список источников пуст.\nДобавь каналы для мониторинга.",
-            reply_markup=get_sources_menu_keyboard(0),
-        )
-        return SOURCES_MENU
+        if count == 0:
+            await query.edit_message_text(
+                "📭 Список источников пуст.\nДобавь каналы для мониторинга.",
+                reply_markup=get_sources_menu_keyboard(0),
+            )
+            return SOURCES_MENU
+
+        total_pages = (count + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+        offset = (page - 1) * ITEMS_PER_PAGE
+        sources = await source_repo.get_by_user(user.id, limit=ITEMS_PER_PAGE, offset=offset)
+
+    context.user_data["sources_page"] = page
 
     await query.edit_message_text(
-        "📺 Твои источники:",
-        reply_markup=get_sources_keyboard(sources),
+        f"📺 Твои источники ({count}):",
+        reply_markup=get_sources_keyboard(sources, page=page, total_pages=total_pages),
     )
 
     return SOURCES_MENU
 
 
-async def remove_source_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Start source removal flow."""
+async def handle_sources_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle pagination in sources list."""
+    query = update.callback_query
+    # Extract page from callback: sources_page:{page}
+    page = int(query.data.split(":")[-1])
+    return await list_sources(update, context, page=page)
+
+
+async def remove_source_start(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 1
+) -> int:
+    """Start source removal flow with pagination."""
     query = update.callback_query
     await query.answer()
 
@@ -319,21 +388,37 @@ async def remove_source_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     db = get_database()
     async with db.session() as session:
         source_repo = SourceRepository(session)
-        sources = await source_repo.get_by_user(user.id, limit=20)
+        count = await source_repo.count_by_user(user.id)
 
-    if not sources:
-        await query.edit_message_text(
-            "📭 Нет источников для удаления.",
-            reply_markup=get_sources_menu_keyboard(0),
-        )
-        return SOURCES_MENU
+        if count == 0:
+            await query.edit_message_text(
+                "📭 Нет источников для удаления.",
+                reply_markup=get_sources_menu_keyboard(0),
+            )
+            return SOURCES_MENU
+
+        total_pages = (count + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+        offset = (page - 1) * ITEMS_PER_PAGE
+        sources = await source_repo.get_by_user(user.id, limit=ITEMS_PER_PAGE, offset=offset)
+
+    context.user_data["remove_page"] = page
 
     await query.edit_message_text(
-        "Выбери источник для удаления:",
-        reply_markup=get_sources_keyboard(sources, for_removal=True),
+        f"Выбери источник для удаления ({count}):",
+        reply_markup=get_sources_keyboard(
+            sources, page=page, total_pages=total_pages, for_removal=True
+        ),
     )
 
     return REMOVE_SOURCE
+
+
+async def handle_remove_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle pagination in source removal list."""
+    query = update.callback_query
+    # Extract page from callback: sources_remove_page:{page}
+    page = int(query.data.split(":")[-1])
+    return await remove_source_start(update, context, page=page)
 
 
 async def confirm_remove_source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -382,7 +467,7 @@ async def execute_remove_source(update: Update, context: ContextTypes.DEFAULT_TY
         count = await source_repo.count_by_user(user.id)
 
     # Restart monitoring with updated sources
-    await _restart_user_monitoring(user.id, context)
+    _restart_user_monitoring(user.id, context)
 
     await query.edit_message_text(
         "✅ Источник удалён.",
@@ -425,11 +510,12 @@ def get_sources_handlers() -> list:
         # Add sources
         CallbackQueryHandler(add_source_menu, pattern="^action:add_source$"),
         CallbackQueryHandler(add_source_file_start, pattern="^action:add_source_file$"),
-        CallbackQueryHandler(finish_add_sources, pattern="^action:done$"),
 
         # List and remove
         CallbackQueryHandler(list_sources, pattern="^action:list_sources$"),
+        CallbackQueryHandler(handle_sources_pagination, pattern=r"^sources_page:\d+$"),
         CallbackQueryHandler(remove_source_start, pattern="^action:remove_source$"),
+        CallbackQueryHandler(handle_remove_pagination, pattern=r"^sources_remove_page:\d+$"),
         CallbackQueryHandler(confirm_remove_source, pattern=r"^source:remove:\d+$"),
         CallbackQueryHandler(execute_remove_source, pattern=r"^confirm:remove_source:\d+$"),
 
