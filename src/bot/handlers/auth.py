@@ -16,6 +16,7 @@ from src.bot.keyboards import (
     get_cancel_keyboard,
     get_main_menu_keyboard,
     get_qr_auth_keyboard,
+    get_start_keyboard,
 )
 from src.bot.messages import Messages
 from src.bot.states import (
@@ -31,7 +32,7 @@ from src.shared.constants import BotState
 from src.shared.exceptions import AuthError
 from src.shared.utils import validate_phone
 from src.storage import get_database
-from src.storage.repositories import UserRepository
+from src.storage.repositories import SessionRepository, UserRepository
 
 logger = structlog.get_logger()
 
@@ -507,7 +508,7 @@ async def handle_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def cancel_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancel authentication flow."""
+    """Cancel authentication flow - show /start screen."""
     query = update.callback_query
     if query:
         await query.answer()
@@ -524,10 +525,22 @@ async def cancel_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data.pop("phone", None)
     context.user_data.pop("phone_code_hash", None)
 
-    await message.reply_text(
-        "Авторизация отменена.",
-        reply_markup=get_main_menu_keyboard(),
-    )
+    # Check if user has valid session to show appropriate screen
+    db = get_database()
+    async with db.session() as session:
+        session_repo = SessionRepository(session)
+        user_session = await session_repo.get_valid_session(user.id)
+
+        if user_session:
+            await message.reply_text(
+                Messages.MAIN_MENU,
+                reply_markup=get_main_menu_keyboard(),
+            )
+        else:
+            await message.reply_text(
+                Messages.START,
+                reply_markup=get_start_keyboard(),
+            )
 
     return MAIN_MENU
 
