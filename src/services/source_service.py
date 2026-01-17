@@ -126,8 +126,9 @@ class SourceService:
 
                     # Check that it's a channel or supergroup, not a bot/user
                     if chat.type not in (ChatType.CHANNEL, ChatType.SUPERGROUP):
+                        chat_type = getattr(chat.type, 'name', str(chat.type))
                         result.errors.append(
-                            SourceAddError(link, f"Это не канал (тип: {chat.type.name})")
+                            SourceAddError(link, f"Это не канал (тип: {chat_type})")
                         )
                         continue
 
