@@ -124,6 +124,14 @@ class SourceService:
                         )
                         continue
 
+                    # Check if this is a ChatPreview (private channel, user not subscribed)
+                    from pyrogram.types import ChatPreview
+                    if isinstance(chat, ChatPreview):
+                        result.errors.append(
+                            SourceAddError(link, "Приватный канал. Сначала подпишись на него.")
+                        )
+                        continue
+
                     # Check that it's a channel or supergroup, not a bot/user
                     if chat.type not in (ChatType.CHANNEL, ChatType.SUPERGROUP):
                         chat_type = getattr(chat.type, 'name', str(chat.type))
