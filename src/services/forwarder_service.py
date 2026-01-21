@@ -497,16 +497,41 @@ class ForwarderService:
                     result = await self._forward_poll(
                         client, message, target.destination.channel_id
                     )
+                elif msg_type == MessageType.UNSUPPORTED:
+                    # Unknown message type (e.g. blockquote that Pyrogram can't parse)
+                    # Just forward directly
+                    logger.info(
+                        "forwarding_unsupported_type",
+                        message_id=message.id,
+                    )
+                    forwarded = await client.client.forward_messages(
+                        chat_id=target.destination.channel_id,
+                        from_chat_id=message.chat.id,
+                        message_ids=message.id,
+                    )
+                    result = forwarded if not isinstance(forwarded, list) else forwarded[0]
                 else:
-                    # Check if message has blockquote - copy_message doesn't preserve it
+                    # Check if message has quote - just forward directly
+                    has_quote = hasattr(message, "quote") and message.quote
+
+                    # Check if message has blockquote entity
                     entities = message.entities or message.caption_entities or []
                     has_blockquote = any(e.type == MessageEntityType.BLOCKQUOTE for e in entities)
 
-                    if has_blockquote:
-                        # Extract blockquote and send as formatted text
-                        result = await self._forward_with_blockquote(
-                            client, message, target.destination.channel_id
+                    if has_quote or has_blockquote:
+                        # Forward directly to preserve quote
+                        logger.info(
+                            "forwarding_with_quote",
+                            message_id=message.id,
+                            has_quote=has_quote,
+                            has_blockquote=has_blockquote,
                         )
+                        forwarded = await client.client.forward_messages(
+                            chat_id=target.destination.channel_id,
+                            from_chat_id=message.chat.id,
+                            message_ids=message.id,
+                        )
+                        result = forwarded if not isinstance(forwarded, list) else forwarded[0]
                     else:
                         result = await client.copy_message(
                             chat_id=target.destination.channel_id,
@@ -682,167 +707,6 @@ class ForwarderService:
             explanation=poll.explanation,
             explanation_entities=poll.explanation_entities,
         )
-
-    def _extract_blockquotes(self, text: str, entities: list) -> tuple[list[str], str, list]:
-        """
-        Extract blockquote texts from message and return remaining text with filtered entities.
-
-        Args:
-            text: Original message text
-            entities: Message entities
-
-        Returns:
-            Tuple of (list of blockquote texts, remaining text, filtered entities)
-        """
-        if not entities or not text:
-            return [], text, entities
-
-        blockquotes = []
-        filtered_entities = []
-        # Sort entities by offset in reverse to remove from end first
-        blockquote_entities = sorted(
-            [e for e in entities if e.type == MessageEntityType.BLOCKQUOTE],
-            key=lambda e: e.offset,
-            reverse=True,
-        )
-
-        # Extract blockquote texts
-        remaining_text = text
-        for entity in blockquote_entities:
-            quote_text = text[entity.offset : entity.offset + entity.length]
-            blockquotes.insert(0, quote_text)  # Insert at beginning to maintain order
-            # Remove blockquote from text
-            remaining_text = (
-                remaining_text[: entity.offset] + remaining_text[entity.offset + entity.length :]
-            )
-
-        # Filter out blockquote entities and adjust offsets for remaining entities
-        offset_adjustments = []
-        for bq_entity in sorted(blockquote_entities, key=lambda e: e.offset):
-            offset_adjustments.append((bq_entity.offset, bq_entity.length))
-
-        for entity in entities:
-            if entity.type == MessageEntityType.BLOCKQUOTE:
-                continue
-            # Skip entities that were inside blockquotes
-            new_offset = entity.offset
-            for adj_offset, adj_length in offset_adjustments:
-                if entity.offset >= adj_offset + adj_length:
-                    new_offset -= adj_length
-                elif entity.offset >= adj_offset:
-                    # Entity starts inside blockquote, skip it
-                    break
-            else:
-                filtered_entities.append(entity)
-
-        return blockquotes, remaining_text.strip(), filtered_entities
-
-    async def _forward_with_blockquote(
-        self,
-        client: MTProtoClient,
-        message: Message,
-        destination_id: int,
-    ) -> Message:
-        """
-        Forward a message with blockquote by extracting quote and sending as formatted text.
-
-        Args:
-            client: MTProto client
-            message: Message with blockquote
-            destination_id: Destination channel ID
-
-        Returns:
-            Sent message
-        """
-        from pyrogram.parser.html import HTML
-
-        # Get text and entities
-        text = message.text or message.caption or ""
-        entities = message.entities or message.caption_entities or []
-
-        # Extract blockquotes
-        blockquotes, remaining_text, filtered_entities = self._extract_blockquotes(text, entities)
-
-        # Format blockquotes as "💬 Цитата: ..."
-        quote_parts = []
-        for quote in blockquotes:
-            # Clean up quote text (remove extra newlines)
-            clean_quote = quote.strip().replace("\n\n", "\n")
-            quote_parts.append(f"💬 <i>{clean_quote}</i>")
-
-        quotes_text = "\n".join(quote_parts)
-
-        # Build new text with HTML formatting for remaining entities
-        if remaining_text and filtered_entities:
-            # Convert remaining text with entities to HTML
-            remaining_html = HTML.unparse(remaining_text, filtered_entities)
-        else:
-            remaining_html = remaining_text
-
-        # Combine: quotes first, then remaining text
-        if quotes_text and remaining_html:
-            new_text = f"{quotes_text}\n\n{remaining_html}"
-        elif quotes_text:
-            new_text = quotes_text
-        else:
-            new_text = remaining_html
-
-        # Send based on message type
-        if message.photo:
-            if len(new_text) > 1024:
-                new_text = new_text[:1021] + "..."
-            return await client.client.send_photo(
-                chat_id=destination_id,
-                photo=message.photo.file_id,
-                caption=new_text,
-                parse_mode="html",
-            )
-        elif message.video:
-            if len(new_text) > 1024:
-                new_text = new_text[:1021] + "..."
-            return await client.client.send_video(
-                chat_id=destination_id,
-                video=message.video.file_id,
-                caption=new_text,
-                parse_mode="html",
-            )
-        elif message.animation:
-            if len(new_text) > 1024:
-                new_text = new_text[:1021] + "..."
-            return await client.client.send_animation(
-                chat_id=destination_id,
-                animation=message.animation.file_id,
-                caption=new_text,
-                parse_mode="html",
-            )
-        elif message.document:
-            if len(new_text) > 1024:
-                new_text = new_text[:1021] + "..."
-            return await client.client.send_document(
-                chat_id=destination_id,
-                document=message.document.file_id,
-                caption=new_text,
-                parse_mode="html",
-            )
-        elif message.audio:
-            if len(new_text) > 1024:
-                new_text = new_text[:1021] + "..."
-            return await client.client.send_audio(
-                chat_id=destination_id,
-                audio=message.audio.file_id,
-                caption=new_text,
-                parse_mode="html",
-            )
-        else:
-            # Text message or unsupported type
-            if len(new_text) > 4096:
-                new_text = new_text[:4093] + "..."
-
-            return await client.client.send_message(
-                chat_id=destination_id,
-                text=new_text,
-                parse_mode="html",
-            )
 
     async def _forward_to_dm(
         self,

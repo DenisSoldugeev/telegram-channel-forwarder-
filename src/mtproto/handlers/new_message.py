@@ -21,6 +21,10 @@ def determine_message_type(message: Message) -> MessageType:
     Returns:
         MessageType enum value
     """
+    # Check for quote reply first (message with quoted text)
+    if hasattr(message, "quote") and message.quote:
+        return MessageType.TEXT
+
     if message.media_group_id:
         return MessageType.MEDIA_GROUP
     if message.poll:
@@ -46,6 +50,18 @@ def determine_message_type(message: Message) -> MessageType:
     if message.contact:
         return MessageType.CONTACT
     if message.text:
+        return MessageType.TEXT
+
+    # Check for quote-only messages (has blockquote entity but text might be empty)
+    if message.entities:
+        from pyrogram.enums import MessageEntityType
+
+        has_blockquote = any(e.type == MessageEntityType.BLOCKQUOTE for e in message.entities)
+        if has_blockquote:
+            return MessageType.TEXT
+
+    # Check for Pyrogram quote attribute (reply with quote)
+    if hasattr(message, "quote") and message.quote:
         return MessageType.TEXT
 
     return MessageType.UNSUPPORTED
@@ -219,7 +235,17 @@ class MessageHandler:
                 message,
                 self._on_media_group,
             )
-        elif message_type != MessageType.UNSUPPORTED:
+        elif message_type == MessageType.UNSUPPORTED:
+            # Check if it's a "phantom" message (has ID but Pyrogram can't parse content)
+            # This happens with some special message types like blockquotes
+            # Try to forward it anyway
+            logger.info(
+                "forwarding_unsupported_message",
+                message_id=message.id,
+                chat_id=message.chat.id,
+            )
+            await self._on_message(message)
+        else:
             # Forward single message
             await self._on_message(message)
 
@@ -251,7 +277,15 @@ class MessageHandler:
                 message,
                 self._on_media_group,
             )
-        elif message_type != MessageType.UNSUPPORTED:
+        elif message_type == MessageType.UNSUPPORTED:
+            # Check if it's a "phantom" message - forward anyway
+            logger.info(
+                "forwarding_unsupported_message",
+                message_id=message.id,
+                chat_id=message.chat.id,
+            )
+            await self._on_message(message)
+        else:
             # Forward single message
             await self._on_message(message)
 
