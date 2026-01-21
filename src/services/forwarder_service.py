@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from io import BytesIO
 
 import structlog
+from pyrogram.enums import MessageEntityType
 from pyrogram.types import (
     InputMediaDocument,
     InputMediaPhoto,
@@ -11,9 +12,9 @@ from pyrogram.types import (
     Message,
 )
 from telegram import Bot as TelegramBot
+from telegram import InputMediaDocument as BotInputMediaDocument
 from telegram import InputMediaPhoto as BotInputMediaPhoto
 from telegram import InputMediaVideo as BotInputMediaVideo
-from telegram import InputMediaDocument as BotInputMediaDocument
 
 from src.app.config import settings
 from src.mtproto.client import MTProtoClient, MTProtoClientManager
@@ -52,6 +53,7 @@ class ForwardTarget:
         if self.destination is not None:
             return self.destination.channel_title
         return "Unknown"
+
 
 logger = structlog.get_logger()
 
@@ -219,16 +221,16 @@ class ForwarderService:
                 # Get latest message ID to not process old messages
                 async for msg in client.client.get_chat_history(chat.id, limit=1):
                     source_state[source.channel_id] = {
-                        'last_msg_id': msg.id,
-                        'chat_id': chat.id,
-                        'title': chat.title,
+                        "last_msg_id": msg.id,
+                        "chat_id": chat.id,
+                        "title": chat.title,
                     }
                     break
                 else:
                     source_state[source.channel_id] = {
-                        'last_msg_id': 0,
-                        'chat_id': chat.id,
-                        'title': chat.title,
+                        "last_msg_id": 0,
+                        "chat_id": chat.id,
+                        "title": chat.title,
                     }
                 logger.info(
                     "source_initialized",
@@ -236,7 +238,7 @@ class ForwarderService:
                     channel_id=source.channel_id,
                     resolved_chat_id=chat.id,
                     chat_title=chat.title,
-                    last_msg_id=source_state[source.channel_id]['last_msg_id'],
+                    last_msg_id=source_state[source.channel_id]["last_msg_id"],
                 )
             except Exception as e:
                 logger.error(
@@ -249,7 +251,9 @@ class ForwarderService:
 
         # Start fallback polling task (catches messages if event handler misses them)
         async def poll_channels():
-            logger.info("fallback_polling_started", user_id=user_id, channels=list(source_state.keys()))
+            logger.info(
+                "fallback_polling_started", user_id=user_id, channels=list(source_state.keys())
+            )
 
             while user_id in self._active_users:
                 for channel_id, state in source_state.items():
@@ -257,10 +261,10 @@ class ForwarderService:
                         # Get new messages since last check
                         new_messages = []
                         async for msg in client.client.get_chat_history(
-                            state['chat_id'],
+                            state["chat_id"],
                             limit=20,
                         ):
-                            if msg.id <= state['last_msg_id']:
+                            if msg.id <= state["last_msg_id"]:
                                 break
                             new_messages.append(msg)
 
@@ -271,13 +275,13 @@ class ForwarderService:
                             logger.info(
                                 "fallback_new_messages",
                                 user_id=user_id,
-                                channel=state['title'],
+                                channel=state["title"],
                                 count=len(new_messages),
                             )
 
                             for msg in new_messages:
                                 await handler.process_message(msg)
-                                state['last_msg_id'] = max(state['last_msg_id'], msg.id)
+                                state["last_msg_id"] = max(state["last_msg_id"], msg.id)
 
                     except Exception as e:
                         logger.error(
@@ -437,9 +441,7 @@ class ForwarderService:
             return
 
         # Check duplicate
-        is_duplicate = await self._delivery_service.check_duplicate(
-            user_id, source_id, message.id
-        )
+        is_duplicate = await self._delivery_service.check_duplicate(user_id, source_id, message.id)
         if is_duplicate:
             logger.debug("duplicate_skipped", message_id=message.id)
             return
@@ -482,7 +484,6 @@ class ForwarderService:
                 # Forward to user's DM via Bot API (download via MTProto, upload via Bot API)
                 result_id = await self._forward_to_dm(user_id, message, client)
             else:
-
                 # Ensure destination channel is in Pyrogram's cache
                 try:
                     if target.destination.channel_username:
@@ -493,13 +494,28 @@ class ForwarderService:
                     logger.warning("destination_cache_error", error=str(e))
 
                 if msg_type == MessageType.POLL:
-                    result = await self._forward_poll(client, message, target.destination.channel_id)
-                else:
-                    result = await client.copy_message(
-                        chat_id=target.destination.channel_id,
-                        from_chat_id=message.chat.id,
-                        message_id=message.id,
+                    result = await self._forward_poll(
+                        client, message, target.destination.channel_id
                     )
+                else:
+                    # Check if message has blockquote - copy_message doesn't preserve it
+                    entities = message.entities or message.caption_entities or []
+                    has_blockquote = any(e.type == MessageEntityType.BLOCKQUOTE for e in entities)
+
+                    if has_blockquote:
+                        # Use forward_messages to preserve blockquote formatting
+                        forwarded = await client.client.forward_messages(
+                            chat_id=target.destination.channel_id,
+                            from_chat_id=message.chat.id,
+                            message_ids=message.id,
+                        )
+                        result = forwarded if not isinstance(forwarded, list) else forwarded[0]
+                    else:
+                        result = await client.copy_message(
+                            chat_id=target.destination.channel_id,
+                            from_chat_id=message.chat.id,
+                            message_id=message.id,
+                        )
                 result_id = result.id
 
             await self._delivery_service.mark_success(log_id, result_id)
@@ -591,7 +607,6 @@ class ForwarderService:
                 # Forward to DM via Bot API (download via MTProto, upload via Bot API)
                 result_id = await self._forward_media_group_to_dm(user_id, messages, client)
             else:
-
                 # Build media group
                 media_list = []
                 for i, msg in enumerate(messages):
@@ -691,7 +706,6 @@ class ForwarderService:
         if not self._bot:
             raise ForwardError("Bot not set", "Бот не инициализирован")
 
-        from pyrogram.enums import MessageEntityType
         from pyrogram.parser.html import HTML
 
         def filter_entities(entities: list) -> list:
@@ -703,8 +717,7 @@ class ForwarderService:
         # Check if message has complex formatting (blockquote, spoiler) - forward directly
         entities = message.entities or message.caption_entities or []
         has_complex_formatting = any(
-            e.type in (MessageEntityType.BLOCKQUOTE, MessageEntityType.SPOILER)
-            for e in entities
+            e.type in (MessageEntityType.BLOCKQUOTE, MessageEntityType.SPOILER) for e in entities
         )
 
         if has_complex_formatting:
@@ -733,7 +746,7 @@ class ForwarderService:
 
         header = f"📢 <b>{source_title}</b>"
         if source_link:
-            header += f" • <a href=\"{source_link}\">Оригинал</a>"
+            header += f' • <a href="{source_link}">Оригинал</a>'
 
         caption = f"{header}\n\n{original_html}" if original_html else header
 
@@ -762,16 +775,20 @@ class ForwarderService:
             return result.message_id
 
         # Truncate caption if too long (Telegram limit is 1024 for media, 4096 for text)
-        has_media = message.photo or message.video or message.document or message.animation or message.audio
+        has_media = (
+            message.photo or message.video or message.document or message.animation or message.audio
+        )
         max_caption_len = 1024 if has_media else 4096
         if len(caption) > max_caption_len:
-            caption = caption[:max_caption_len - 3] + "..."
+            caption = caption[: max_caption_len - 3] + "..."
 
         # Handle different message types
         if message.photo:
             # Download photo to memory
             photo_bytes = await client.client.download_media(message, in_memory=True)
-            photo_data = BytesIO(photo_bytes.getvalue() if hasattr(photo_bytes, 'getvalue') else photo_bytes)
+            photo_data = BytesIO(
+                photo_bytes.getvalue() if hasattr(photo_bytes, "getvalue") else photo_bytes
+            )
 
             result = await self._bot.send_photo(
                 chat_id=user_id,
@@ -782,7 +799,9 @@ class ForwarderService:
         elif message.video:
             # Download video to memory
             video_bytes = await client.client.download_media(message, in_memory=True)
-            video_data = BytesIO(video_bytes.getvalue() if hasattr(video_bytes, 'getvalue') else video_bytes)
+            video_data = BytesIO(
+                video_bytes.getvalue() if hasattr(video_bytes, "getvalue") else video_bytes
+            )
 
             result = await self._bot.send_video(
                 chat_id=user_id,
@@ -793,7 +812,9 @@ class ForwarderService:
         elif message.animation:
             # Download animation (GIF) to memory
             anim_bytes = await client.client.download_media(message, in_memory=True)
-            anim_data = BytesIO(anim_bytes.getvalue() if hasattr(anim_bytes, 'getvalue') else anim_bytes)
+            anim_data = BytesIO(
+                anim_bytes.getvalue() if hasattr(anim_bytes, "getvalue") else anim_bytes
+            )
 
             result = await self._bot.send_animation(
                 chat_id=user_id,
@@ -804,7 +825,9 @@ class ForwarderService:
         elif message.document:
             # Download document to memory
             doc_bytes = await client.client.download_media(message, in_memory=True)
-            doc_data = BytesIO(doc_bytes.getvalue() if hasattr(doc_bytes, 'getvalue') else doc_bytes)
+            doc_data = BytesIO(
+                doc_bytes.getvalue() if hasattr(doc_bytes, "getvalue") else doc_bytes
+            )
 
             result = await self._bot.send_document(
                 chat_id=user_id,
@@ -816,7 +839,9 @@ class ForwarderService:
         elif message.audio:
             # Download audio to memory
             audio_bytes = await client.client.download_media(message, in_memory=True)
-            audio_data = BytesIO(audio_bytes.getvalue() if hasattr(audio_bytes, 'getvalue') else audio_bytes)
+            audio_data = BytesIO(
+                audio_bytes.getvalue() if hasattr(audio_bytes, "getvalue") else audio_bytes
+            )
 
             result = await self._bot.send_audio(
                 chat_id=user_id,
@@ -843,7 +868,9 @@ class ForwarderService:
         elif message.sticker:
             # Download sticker to memory
             sticker_bytes = await client.client.download_media(message, in_memory=True)
-            sticker_data = BytesIO(sticker_bytes.getvalue() if hasattr(sticker_bytes, 'getvalue') else sticker_bytes)
+            sticker_data = BytesIO(
+                sticker_bytes.getvalue() if hasattr(sticker_bytes, "getvalue") else sticker_bytes
+            )
 
             result = await self._bot.send_sticker(
                 chat_id=user_id,
@@ -880,7 +907,6 @@ class ForwarderService:
         if not self._bot:
             raise ForwardError("Bot not set", "Бот не инициализирован")
 
-        from pyrogram.enums import MessageEntityType
         from pyrogram.parser.html import HTML
 
         def filter_entities(entities: list) -> list:
@@ -904,7 +930,7 @@ class ForwarderService:
 
         header = f"📢 <b>{source_title}</b>"
         if source_link:
-            header += f" • <a href=\"{source_link}\">Оригинал</a>"
+            header += f' • <a href="{source_link}">Оригинал</a>'
 
         caption = f"{header}\n\n{original_html}" if original_html else header
 
@@ -941,29 +967,37 @@ class ForwarderService:
         for i, msg in enumerate(messages):
             # Download to memory
             media_bytes = await client.client.download_media(msg, in_memory=True)
-            media_data = BytesIO(media_bytes.getvalue() if hasattr(media_bytes, 'getvalue') else media_bytes)
+            media_data = BytesIO(
+                media_bytes.getvalue() if hasattr(media_bytes, "getvalue") else media_bytes
+            )
 
             # Only first item gets caption
             item_caption = caption if i == 0 else None
 
             if msg.photo:
-                media_list.append(BotInputMediaPhoto(
-                    media=media_data,
-                    caption=item_caption,
-                    parse_mode="HTML" if item_caption else None,
-                ))
+                media_list.append(
+                    BotInputMediaPhoto(
+                        media=media_data,
+                        caption=item_caption,
+                        parse_mode="HTML" if item_caption else None,
+                    )
+                )
             elif msg.video:
-                media_list.append(BotInputMediaVideo(
-                    media=media_data,
-                    caption=item_caption,
-                    parse_mode="HTML" if item_caption else None,
-                ))
+                media_list.append(
+                    BotInputMediaVideo(
+                        media=media_data,
+                        caption=item_caption,
+                        parse_mode="HTML" if item_caption else None,
+                    )
+                )
             elif msg.document:
-                media_list.append(BotInputMediaDocument(
-                    media=media_data,
-                    caption=item_caption,
-                    parse_mode="HTML" if item_caption else None,
-                ))
+                media_list.append(
+                    BotInputMediaDocument(
+                        media=media_data,
+                        caption=item_caption,
+                        parse_mode="HTML" if item_caption else None,
+                    )
+                )
 
         if media_list:
             results = await self._bot.send_media_group(
