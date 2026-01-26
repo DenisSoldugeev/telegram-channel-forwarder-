@@ -629,42 +629,69 @@ class ForwarderService:
                 # Forward to DM via Bot API (download via MTProto, upload via Bot API)
                 result_id = await self._forward_media_group_to_dm(user_id, messages, client)
             else:
-                # Build media group
-                media_list = []
-                for i, msg in enumerate(messages):
-                    caption = msg.caption if i == 0 else None
-                    caption_entities = msg.caption_entities if i == 0 else None
+                # Check if media group has special content that requires forwarding:
+                # 1. Blockquote in caption entities
+                # 2. Message without media (text-only message with blockquote - Pyrogram can't parse it)
+                has_blockquote = False
+                has_non_media_message = False
 
-                    if msg.photo:
-                        media = InputMediaPhoto(
-                            media=msg.photo.file_id,
-                            caption=caption,
-                            caption_entities=caption_entities,
-                        )
-                    elif msg.video:
-                        media = InputMediaVideo(
-                            media=msg.video.file_id,
-                            caption=caption,
-                            caption_entities=caption_entities,
-                        )
-                    elif msg.document:
-                        media = InputMediaDocument(
-                            media=msg.document.file_id,
-                            caption=caption,
-                        )
-                    else:
-                        continue
+                for msg in messages:
+                    if msg.caption_entities:
+                        for e in msg.caption_entities:
+                            if e.type == MessageEntityType.BLOCKQUOTE:
+                                has_blockquote = True
+                                break
 
-                    media_list.append(media)
+                    if not (msg.photo or msg.video or msg.document or msg.audio or msg.animation):
+                        has_non_media_message = True
 
-                if media_list:
-                    results = await client.send_media_group(
+                should_forward = has_blockquote or has_non_media_message
+
+                if should_forward:
+                    forwarded = await client.client.forward_messages(
                         chat_id=target.destination.channel_id,
-                        media=media_list,
+                        from_chat_id=first_msg.chat.id,
+                        message_ids=[m.id for m in messages],
                     )
-                    result_id = results[0].id
+                    result = forwarded if not isinstance(forwarded, list) else forwarded[0]
+                    result_id = result.id
                 else:
-                    return
+                    # Build media group
+                    media_list = []
+                    for i, msg in enumerate(messages):
+                        caption = msg.caption if i == 0 else None
+                        caption_entities = msg.caption_entities if i == 0 else None
+
+                        if msg.photo:
+                            media = InputMediaPhoto(
+                                media=msg.photo.file_id,
+                                caption=caption,
+                                caption_entities=caption_entities,
+                            )
+                        elif msg.video:
+                            media = InputMediaVideo(
+                                media=msg.video.file_id,
+                                caption=caption,
+                                caption_entities=caption_entities,
+                            )
+                        elif msg.document:
+                            media = InputMediaDocument(
+                                media=msg.document.file_id,
+                                caption=caption,
+                            )
+                        else:
+                            continue
+
+                        media_list.append(media)
+
+                    if media_list:
+                        results = await client.send_media_group(
+                            chat_id=target.destination.channel_id,
+                            media=media_list,
+                        )
+                        result_id = results[0].id
+                    else:
+                        return
 
             await self._delivery_service.mark_success(log_id, result_id)
 
