@@ -472,7 +472,12 @@ class ForwarderService:
             client = await self._client_manager.get_client(user_id)
 
             # Forward message directly - preserves all formatting
-            chat_id = user_id if target.is_dm else target.destination.channel_id
+            # For DM mode: send to bot chat (not Saved Messages)
+            if target.is_dm:
+                bot_id = int(settings.bot_token.get_secret_value().split(":")[0])
+                chat_id = bot_id
+            else:
+                chat_id = target.destination.channel_id
             forwarded = await client.client.forward_messages(
                 chat_id=chat_id,
                 from_chat_id=message.chat.id,
@@ -541,16 +546,116 @@ class ForwarderService:
         if is_duplicate:
             return
 
-        # Check keyword filter using first message (usually has caption)
-        if not self._check_keyword_filter(first_msg):
-            logger.info(
-                "media_group_filtered_by_keywords",
-                message_id=first_msg.id,
-                chat_id=first_msg.chat.id,
-                count=len(messages),
-                filter_mode=settings.filter_mode,
-            )
-            return
+        # Check keyword filter - check ALL messages in group (text can be in any message)
+        # For messages with blockquote, Pyrogram may not see the text, so re-fetch
+        client = await self._client_manager.get_client(user_id)
+        message_ids = [m.id for m in messages]
+
+        # Small delay to ensure messages are fully available in API
+        await asyncio.sleep(1.0)
+
+        # Re-fetch messages to get full content (helps with blockquote messages)
+        fetched_messages = await client.client.get_messages(
+            chat_id=first_msg.chat.id,
+            message_ids=message_ids,
+        )
+        if not isinstance(fetched_messages, list):
+            fetched_messages = [fetched_messages]
+
+        # Check if we have any text content to filter
+        has_any_text = any(
+            fm and (fm.text or fm.caption) for fm in fetched_messages
+        )
+
+        # Check if there's a non-media message (likely contains blockquote text)
+        has_non_media = any(
+            not (m.photo or m.video or m.document or m.audio or m.animation)
+            for m in messages
+        )
+
+        # If there's a non-media message (blockquote) but no text found -
+        # Pyrogram can't read the text, try to get raw text
+        if has_non_media and not has_any_text:
+            # Try to find text in raw message data
+            raw_text = None
+            for fm in fetched_messages:
+                if fm and hasattr(fm, '_raw'):
+                    # Check raw Telegram message for text
+                    raw = fm._raw
+                    if hasattr(raw, 'message') and raw.message:
+                        raw_text = raw.message
+                        logger.info(
+                            "media_group_raw_text_found",
+                            message_id=fm.id,
+                            text_preview=raw_text[:50] if raw_text else None,
+                        )
+                        break
+
+            if raw_text:
+                # Check filter on raw text
+                if settings.filter_keywords:
+                    import re
+                    text = raw_text
+                    flags = 0 if settings.filter_case_sensitive else re.IGNORECASE
+
+                    def matches_keyword(kw: str) -> bool:
+                        escaped_kw = re.escape(kw)
+                        if kw.startswith("#"):
+                            pattern = r"(?:^|(?<=\s))" + escaped_kw + r"(?=\s|$)"
+                        else:
+                            pattern = r"\b" + escaped_kw + r"\b"
+                        return bool(re.search(pattern, text, flags))
+
+                    has_match = any(matches_keyword(kw) for kw in settings.filter_keywords)
+
+                    if settings.filter_mode == "blacklist" and has_match:
+                        logger.info(
+                            "media_group_filtered_by_raw_text",
+                            message_id=first_msg.id,
+                            text_preview=raw_text[:50],
+                        )
+                        return
+                    elif settings.filter_mode == "whitelist" and not has_match:
+                        logger.info(
+                            "media_group_filtered_by_raw_text",
+                            message_id=first_msg.id,
+                            reason="whitelist_no_match",
+                        )
+                        return
+            else:
+                logger.info(
+                    "media_group_with_blockquote_no_text",
+                    message_id=first_msg.id,
+                    reason="forwarding_without_filter",
+                )
+            # Continue to forward
+        else:
+            # Log found text
+            for fm in fetched_messages:
+                if fm and (fm.text or fm.caption):
+                    logger.info(
+                        "media_group_text_found",
+                        message_id=fm.id,
+                        text_preview=(fm.text or fm.caption)[:50],
+                    )
+
+            # Check filter on fetched messages
+            if settings.filter_mode == "blacklist":
+                # Blacklist: ALL messages must pass (no keywords in any)
+                passes_filter = all(self._check_keyword_filter(fm) for fm in fetched_messages if fm)
+            else:
+                # Whitelist: ANY message must have keyword
+                passes_filter = any(self._check_keyword_filter(fm) for fm in fetched_messages if fm)
+
+            if not passes_filter:
+                logger.info(
+                    "media_group_filtered_by_keywords",
+                    message_id=first_msg.id,
+                    chat_id=first_msg.chat.id,
+                    count=len(messages),
+                    filter_mode=settings.filter_mode,
+                )
+                return
 
         # Create pending delivery
         dest_id = target.destination.id if target.destination else None
@@ -566,7 +671,12 @@ class ForwarderService:
             client = await self._client_manager.get_client(user_id)
 
             # Forward all messages directly - preserves all formatting and media
-            chat_id = user_id if target.is_dm else target.destination.channel_id
+            # For DM mode: send to bot chat (not Saved Messages)
+            if target.is_dm:
+                bot_id = int(settings.bot_token.get_secret_value().split(":")[0])
+                chat_id = bot_id
+            else:
+                chat_id = target.destination.channel_id
             forwarded = await client.client.forward_messages(
                 chat_id=chat_id,
                 from_chat_id=first_msg.chat.id,
