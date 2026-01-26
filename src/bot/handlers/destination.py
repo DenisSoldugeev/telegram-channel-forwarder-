@@ -113,8 +113,12 @@ async def handle_destination_input(update: Update, context: ContextTypes.DEFAULT
 
         # Restart monitoring to update target (DM -> channel)
         forwarder = context.bot_data.get("forwarder_service")
-        if forwarder and user.id in forwarder._active_users:
-            await forwarder.start_user_monitoring(user.id)
+        if forwarder:
+            try:
+                await forwarder.start_user_monitoring(user.id)
+                logger.info("monitoring_restarted_after_destination_set", user_id=user.id)
+            except Exception as e:
+                logger.warning("monitoring_restart_failed", user_id=user.id, error=str(e))
 
         await update.message.reply_text(
             Messages.DESTINATION_SUCCESS.format(
@@ -149,8 +153,12 @@ async def reset_destination(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # Restart monitoring to update target (channel -> DM)
     forwarder = context.bot_data.get("forwarder_service")
-    if forwarder and user.id in forwarder._active_users:
-        await forwarder.start_user_monitoring(user.id)
+    if forwarder:
+        try:
+            await forwarder.start_user_monitoring(user.id)
+            logger.info("monitoring_restarted_after_destination_reset", user_id=user.id)
+        except Exception as e:
+            logger.warning("monitoring_restart_failed", user_id=user.id, error=str(e))
 
     await query.edit_message_text(
         "✅ Получатель сброшен.\n\nТеперь посты будут приходить в ЛС бота.",

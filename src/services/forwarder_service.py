@@ -1,22 +1,16 @@
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
-from io import BytesIO
 
 import structlog
-from pyrogram.enums import MessageEntityType
 from pyrogram.types import Message
 from telegram import Bot as TelegramBot
-from telegram import InputMediaDocument as BotInputMediaDocument
-from telegram import InputMediaPhoto as BotInputMediaPhoto
-from telegram import InputMediaVideo as BotInputMediaVideo
 
 from src.app.config import settings
-from src.mtproto.client import MTProtoClient, MTProtoClientManager
-from src.mtproto.handlers.new_message import MessageHandler, determine_message_type
+from src.mtproto.client import MTProtoClientManager
+from src.mtproto.handlers.new_message import MessageHandler
 from src.mtproto.session_manager import SessionManager
 from src.services.delivery_service import DeliveryService
-from src.shared.constants import MessageType
 from src.shared.exceptions import ForwardError, RateLimitError
 from src.storage.database import Database
 from src.storage.models import Destination
@@ -87,6 +81,7 @@ class ForwarderService:
         self._user_targets: dict[int, ForwardTarget] = {}
         self._user_locks: dict[int, asyncio.Lock] = {}
         self._polling_tasks: dict[int, asyncio.Task] = {}
+        self._user_pyrogram_handlers: dict[int, any] = {}
 
     def set_bot(self, bot: TelegramBot) -> None:
         """Set bot instance (for late binding after app init)."""
@@ -170,7 +165,9 @@ class ForwarderService:
         await client.warm_cache()
 
         # Register event handler for instant delivery (works for subscribed channels)
-        client.client.add_handler(handler.get_pyrogram_handler())
+        pyrogram_handler = handler.get_pyrogram_handler()
+        client.client.add_handler(pyrogram_handler)
+        self._user_pyrogram_handlers[user_id] = pyrogram_handler
         logger.info("event_handler_registered", user_id=user_id)
 
         self._active_users[user_id] = handler
@@ -320,6 +317,16 @@ class ForwarderService:
                 pass
             del self._polling_tasks[user_id]
 
+        # Remove Pyrogram handler
+        if user_id in self._user_pyrogram_handlers:
+            try:
+                client = await self._client_manager.get_client(user_id)
+                client.client.remove_handler(self._user_pyrogram_handlers[user_id])
+                logger.info("event_handler_removed", user_id=user_id)
+            except Exception as e:
+                logger.warning("event_handler_remove_failed", user_id=user_id, error=str(e))
+            del self._user_pyrogram_handlers[user_id]
+
         if user_id in self._active_users:
             del self._active_users[user_id]
             self._user_locks.pop(user_id, None)
@@ -461,79 +468,18 @@ class ForwarderService:
         )
 
         try:
-            msg_type = determine_message_type(message)
-
-            logger.info(
-                "forwarding_attempt",
-                user_id=user_id,
-                from_chat_id=message.chat.id,
-                to_target=target.title,
-                is_dm=target.is_dm,
-                message_id=message.id,
-            )
-
-            # Get client for both DM and channel forwarding
+            # Get client
             client = await self._client_manager.get_client(user_id)
 
-            if target.is_dm:
-                # Forward to user's DM via Bot API (download via MTProto, upload via Bot API)
-                result_id = await self._forward_to_dm(user_id, message, client)
-            else:
-                # Ensure destination channel is in Pyrogram's cache
-                try:
-                    if target.destination.channel_username:
-                        await client.client.get_chat(target.destination.channel_username)
-                    else:
-                        await client.client.get_chat(target.destination.channel_id)
-                except Exception as e:
-                    logger.warning("destination_cache_error", error=str(e))
-
-                if msg_type == MessageType.POLL:
-                    result = await self._forward_poll(
-                        client, message, target.destination.channel_id
-                    )
-                elif msg_type == MessageType.UNSUPPORTED:
-                    # Unknown message type (e.g. blockquote that Pyrogram can't parse)
-                    # Just forward directly
-                    logger.info(
-                        "forwarding_unsupported_type",
-                        message_id=message.id,
-                    )
-                    forwarded = await client.client.forward_messages(
-                        chat_id=target.destination.channel_id,
-                        from_chat_id=message.chat.id,
-                        message_ids=message.id,
-                    )
-                    result = forwarded if not isinstance(forwarded, list) else forwarded[0]
-                else:
-                    # Check if message has quote - just forward directly
-                    has_quote = hasattr(message, "quote") and message.quote
-
-                    # Check if message has blockquote entity
-                    entities = message.entities or message.caption_entities or []
-                    has_blockquote = any(e.type == MessageEntityType.BLOCKQUOTE for e in entities)
-
-                    if has_quote or has_blockquote:
-                        # Forward directly to preserve quote
-                        logger.info(
-                            "forwarding_with_quote",
-                            message_id=message.id,
-                            has_quote=has_quote,
-                            has_blockquote=has_blockquote,
-                        )
-                        forwarded = await client.client.forward_messages(
-                            chat_id=target.destination.channel_id,
-                            from_chat_id=message.chat.id,
-                            message_ids=message.id,
-                        )
-                        result = forwarded if not isinstance(forwarded, list) else forwarded[0]
-                    else:
-                        result = await client.copy_message(
-                            chat_id=target.destination.channel_id,
-                            from_chat_id=message.chat.id,
-                            message_id=message.id,
-                        )
-                result_id = result.id
+            # Forward message directly - preserves all formatting
+            chat_id = user_id if target.is_dm else target.destination.channel_id
+            forwarded = await client.client.forward_messages(
+                chat_id=chat_id,
+                from_chat_id=message.chat.id,
+                message_ids=message.id,
+            )
+            result = forwarded if not isinstance(forwarded, list) else forwarded[0]
+            result_id = result.id
 
             await self._delivery_service.mark_success(log_id, result_id)
 
@@ -545,7 +491,6 @@ class ForwarderService:
                 user_id=user_id,
                 source_id=source_id,
                 message_id=message.id,
-                type=msg_type.value,
                 target=target.title,
             )
 
@@ -620,18 +565,15 @@ class ForwarderService:
             # Get client for both DM and channel forwarding
             client = await self._client_manager.get_client(user_id)
 
-            if target.is_dm:
-                # Forward to DM via Bot API (download via MTProto, upload via Bot API)
-                result_id = await self._forward_media_group_to_dm(user_id, messages, client)
-            else:
-                # Forward all messages directly - preserves all formatting and media
-                forwarded = await client.client.forward_messages(
-                    chat_id=target.destination.channel_id,
-                    from_chat_id=first_msg.chat.id,
-                    message_ids=[m.id for m in messages],
-                )
-                result = forwarded if not isinstance(forwarded, list) else forwarded[0]
-                result_id = result.id
+            # Forward all messages directly - preserves all formatting and media
+            chat_id = user_id if target.is_dm else target.destination.channel_id
+            forwarded = await client.client.forward_messages(
+                chat_id=chat_id,
+                from_chat_id=first_msg.chat.id,
+                message_ids=[m.id for m in messages],
+            )
+            result = forwarded if not isinstance(forwarded, list) else forwarded[0]
+            result_id = result.id
 
             await self._delivery_service.mark_success(log_id, result_id)
 
@@ -653,387 +595,6 @@ class ForwarderService:
                 error=str(e),
             )
             await self._delivery_service.mark_failed(log_id, str(e))
-
-    async def _forward_poll(
-        self,
-        client: MTProtoClient,
-        message: Message,
-        destination_id: int,
-    ) -> Message:
-        """Forward a poll by recreating it."""
-        poll = message.poll
-
-        return await client.send_poll(
-            chat_id=destination_id,
-            question=poll.question,
-            options=[opt.text for opt in poll.options],
-            is_anonymous=poll.is_anonymous,
-            type=poll.type.value if poll.type else "regular",
-            allows_multiple_answers=poll.allows_multiple_answers,
-            correct_option_id=poll.correct_option_id,
-            explanation=poll.explanation,
-            explanation_entities=poll.explanation_entities,
-        )
-
-    async def _forward_to_dm(
-        self,
-        user_id: int,
-        message: Message,
-        client: MTProtoClient,
-    ) -> int:
-        """
-        Forward message to user's DM via Bot API with full media support.
-
-        Args:
-            user_id: User ID to send to
-            message: Pyrogram message to forward
-            client: MTProto client for downloading media
-
-        Returns:
-            Sent message ID
-        """
-        if not self._bot:
-            raise ForwardError("Bot not set", "Бот не инициализирован")
-
-        from pyrogram.parser.html import HTML
-
-        def filter_entities(entities: list) -> list:
-            """Filter out custom emoji entities (not supported by Bot API)."""
-            if not entities:
-                return []
-            return [e for e in entities if e.type != MessageEntityType.CUSTOM_EMOJI]
-
-        # Check if message has complex formatting (blockquote, spoiler) - forward directly
-        entities = message.entities or message.caption_entities or []
-        has_complex_formatting = any(
-            e.type in (MessageEntityType.BLOCKQUOTE, MessageEntityType.SPOILER) for e in entities
-        )
-
-        if has_complex_formatting:
-            # Forward directly to preserve complex formatting
-            forwarded = await client.client.forward_messages(
-                chat_id=user_id,
-                from_chat_id=message.chat.id,
-                message_ids=message.id,
-            )
-            result = forwarded if not isinstance(forwarded, list) else forwarded[0]
-            return result.id
-
-        # Build caption with source info, preserving original formatting (links, bold, etc.)
-
-        source_title = message.chat.title or message.chat.username or "Unknown"
-        source_link = self._get_message_link(message)
-
-        # Get original text with HTML formatting (preserves links, bold, italic, etc.)
-        # Filter out custom emoji entities - they become regular emoji in text
-        if message.text:
-            original_html = HTML.unparse(message.text, filter_entities(message.entities))
-        elif message.caption:
-            original_html = HTML.unparse(message.caption, filter_entities(message.caption_entities))
-        else:
-            original_html = ""
-
-        header = f"📢 <b>{source_title}</b>"
-        if source_link:
-            header += f' • <a href="{source_link}">Оригинал</a>'
-
-        caption = f"{header}\n\n{original_html}" if original_html else header
-
-        # Check file size - if too large, send text only
-        file_size = self._get_media_size(message)
-        if file_size and file_size > settings.dm_max_media_size_mb * 1024 * 1024:
-            logger.info(
-                "media_too_large_for_dm",
-                user_id=user_id,
-                file_size_mb=round(file_size / (1024 * 1024), 1),
-                limit_mb=settings.dm_max_media_size_mb,
-            )
-            # Send text with link only
-            size_mb = file_size / (1024 * 1024)
-            caption += f"\n\n⚠️ Медиа слишком большое ({size_mb:.1f} МБ), перейдите по ссылке для просмотра."
-
-            if len(caption) > 4096:
-                caption = caption[:4093] + "..."
-
-            result = await self._bot.send_message(
-                chat_id=user_id,
-                text=caption,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            return result.message_id
-
-        # Truncate caption if too long (Telegram limit is 1024 for media, 4096 for text)
-        has_media = (
-            message.photo or message.video or message.document or message.animation or message.audio
-        )
-        max_caption_len = 1024 if has_media else 4096
-        if len(caption) > max_caption_len:
-            caption = caption[: max_caption_len - 3] + "..."
-
-        # Handle different message types
-        if message.photo:
-            # Download photo to memory
-            photo_bytes = await client.client.download_media(message, in_memory=True)
-            photo_data = BytesIO(
-                photo_bytes.getvalue() if hasattr(photo_bytes, "getvalue") else photo_bytes
-            )
-
-            result = await self._bot.send_photo(
-                chat_id=user_id,
-                photo=photo_data,
-                caption=caption,
-                parse_mode="HTML",
-            )
-        elif message.video:
-            # Download video to memory
-            video_bytes = await client.client.download_media(message, in_memory=True)
-            video_data = BytesIO(
-                video_bytes.getvalue() if hasattr(video_bytes, "getvalue") else video_bytes
-            )
-
-            result = await self._bot.send_video(
-                chat_id=user_id,
-                video=video_data,
-                caption=caption,
-                parse_mode="HTML",
-            )
-        elif message.animation:
-            # Download animation (GIF) to memory
-            anim_bytes = await client.client.download_media(message, in_memory=True)
-            anim_data = BytesIO(
-                anim_bytes.getvalue() if hasattr(anim_bytes, "getvalue") else anim_bytes
-            )
-
-            result = await self._bot.send_animation(
-                chat_id=user_id,
-                animation=anim_data,
-                caption=caption,
-                parse_mode="HTML",
-            )
-        elif message.document:
-            # Download document to memory
-            doc_bytes = await client.client.download_media(message, in_memory=True)
-            doc_data = BytesIO(
-                doc_bytes.getvalue() if hasattr(doc_bytes, "getvalue") else doc_bytes
-            )
-
-            result = await self._bot.send_document(
-                chat_id=user_id,
-                document=doc_data,
-                caption=caption,
-                parse_mode="HTML",
-                filename=message.document.file_name,
-            )
-        elif message.audio:
-            # Download audio to memory
-            audio_bytes = await client.client.download_media(message, in_memory=True)
-            audio_data = BytesIO(
-                audio_bytes.getvalue() if hasattr(audio_bytes, "getvalue") else audio_bytes
-            )
-
-            result = await self._bot.send_audio(
-                chat_id=user_id,
-                audio=audio_data,
-                caption=caption,
-                parse_mode="HTML",
-            )
-        elif message.voice:
-            # Forward voice messages directly (keeps "Forwarded from" label but works reliably)
-            forwarded = await client.client.forward_messages(
-                chat_id=user_id,
-                from_chat_id=message.chat.id,
-                message_ids=message.id,
-            )
-            result = forwarded if not isinstance(forwarded, list) else forwarded[0]
-        elif message.video_note:
-            # Forward video notes directly (keeps "Forwarded from" label but works reliably)
-            forwarded = await client.client.forward_messages(
-                chat_id=user_id,
-                from_chat_id=message.chat.id,
-                message_ids=message.id,
-            )
-            result = forwarded if not isinstance(forwarded, list) else forwarded[0]
-        elif message.sticker:
-            # Download sticker to memory
-            sticker_bytes = await client.client.download_media(message, in_memory=True)
-            sticker_data = BytesIO(
-                sticker_bytes.getvalue() if hasattr(sticker_bytes, "getvalue") else sticker_bytes
-            )
-
-            result = await self._bot.send_sticker(
-                chat_id=user_id,
-                sticker=sticker_data,
-            )
-        else:
-            # Text message or unsupported type - send as text
-            result = await self._bot.send_message(
-                chat_id=user_id,
-                text=caption,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-
-        return result.message_id
-
-    async def _forward_media_group_to_dm(
-        self,
-        user_id: int,
-        messages: list[Message],
-        client: MTProtoClient,
-    ) -> int:
-        """
-        Forward media group to user's DM via Bot API with full media support.
-
-        Args:
-            user_id: User ID to send to
-            messages: List of Pyrogram messages in group
-            client: MTProto client for downloading media
-
-        Returns:
-            First sent message ID
-        """
-        if not self._bot:
-            raise ForwardError("Bot not set", "Бот не инициализирован")
-
-        from pyrogram.parser.html import HTML
-
-        def filter_entities(entities: list) -> list:
-            """Filter out custom emoji entities (not supported by Bot API)."""
-            if not entities:
-                return []
-            return [e for e in entities if e.type != MessageEntityType.CUSTOM_EMOJI]
-
-        first_msg = messages[0]
-        source_title = first_msg.chat.title or first_msg.chat.username or "Unknown"
-        source_link = self._get_message_link(first_msg)
-
-        # Build caption with HTML formatting preserved (links, bold, etc.)
-        # Filter out custom emoji entities - they become regular emoji in text
-        if first_msg.caption:
-            original_html = HTML.unparse(
-                first_msg.caption, filter_entities(first_msg.caption_entities)
-            )
-        else:
-            original_html = ""
-
-        header = f"📢 <b>{source_title}</b>"
-        if source_link:
-            header += f' • <a href="{source_link}">Оригинал</a>'
-
-        caption = f"{header}\n\n{original_html}" if original_html else header
-
-        # Check total size of album
-        total_size = sum(self._get_media_size(msg) or 0 for msg in messages)
-        if total_size > settings.dm_max_media_size_mb * 1024 * 1024:
-            logger.info(
-                "media_group_too_large_for_dm",
-                user_id=user_id,
-                total_size_mb=round(total_size / (1024 * 1024), 1),
-                count=len(messages),
-                limit_mb=settings.dm_max_media_size_mb,
-            )
-            # Send text with link only
-            size_mb = total_size / (1024 * 1024)
-            caption += f"\n\n⚠️ Альбом слишком большой ({size_mb:.1f} МБ, {len(messages)} файлов), перейдите по ссылке для просмотра."
-
-            if len(caption) > 4096:
-                caption = caption[:4093] + "..."
-
-            result = await self._bot.send_message(
-                chat_id=user_id,
-                text=caption,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            return result.message_id
-
-        if len(caption) > 1024:
-            caption = caption[:1021] + "..."
-
-        # Download all media and build media group
-        media_list = []
-        for i, msg in enumerate(messages):
-            # Download to memory
-            media_bytes = await client.client.download_media(msg, in_memory=True)
-            media_data = BytesIO(
-                media_bytes.getvalue() if hasattr(media_bytes, "getvalue") else media_bytes
-            )
-
-            # Only first item gets caption
-            item_caption = caption if i == 0 else None
-
-            if msg.photo:
-                media_list.append(
-                    BotInputMediaPhoto(
-                        media=media_data,
-                        caption=item_caption,
-                        parse_mode="HTML" if item_caption else None,
-                    )
-                )
-            elif msg.video:
-                media_list.append(
-                    BotInputMediaVideo(
-                        media=media_data,
-                        caption=item_caption,
-                        parse_mode="HTML" if item_caption else None,
-                    )
-                )
-            elif msg.document:
-                media_list.append(
-                    BotInputMediaDocument(
-                        media=media_data,
-                        caption=item_caption,
-                        parse_mode="HTML" if item_caption else None,
-                    )
-                )
-
-        if media_list:
-            results = await self._bot.send_media_group(
-                chat_id=user_id,
-                media=media_list,
-            )
-            return results[0].message_id
-        else:
-            # Fallback to text if no media
-            result = await self._bot.send_message(
-                chat_id=user_id,
-                text=caption,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            return result.message_id
-
-    def _get_message_link(self, message: Message) -> str | None:
-        """Get link to original message."""
-        if message.chat.username:
-            return f"https://t.me/{message.chat.username}/{message.id}"
-        # For private channels, use c/ format
-        chat_id = str(message.chat.id)
-        if chat_id.startswith("-100"):
-            chat_id = chat_id[4:]  # Remove -100 prefix
-        return f"https://t.me/c/{chat_id}/{message.id}"
-
-    def _get_media_size(self, message: Message) -> int | None:
-        """Get file size of media in message."""
-        if message.photo:
-            # Photo has multiple sizes, get the largest
-            return message.photo.file_size
-        elif message.video:
-            return message.video.file_size
-        elif message.animation:
-            return message.animation.file_size
-        elif message.document:
-            return message.document.file_size
-        elif message.audio:
-            return message.audio.file_size
-        elif message.voice:
-            return message.voice.file_size
-        elif message.video_note:
-            return message.video_note.file_size
-        elif message.sticker:
-            return message.sticker.file_size
-        return None
 
     async def _get_source_id(self, user_id: int, channel_id: int) -> int | None:
         """Get source ID for channel."""
