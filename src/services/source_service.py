@@ -140,6 +140,37 @@ class SourceService:
                         )
                         continue
 
+                    # Auto-join public channels to receive messages
+                    # Try to join - works for public channels, silently fails if already member
+                    # Priority: chat.username > chat.usernames > validation.username > chat.id
+                    join_target = chat.username
+                    if not join_target and hasattr(chat, 'usernames') and chat.usernames:
+                        # Use first available username from aliases
+                        join_target = chat.usernames[0].username
+                    if not join_target and validation.username:
+                        # Use username from original link if chat object doesn't have it
+                        join_target = validation.username
+                    if not join_target:
+                        # Last resort - try joining by chat.id
+                        join_target = chat.id
+
+                    try:
+                        await client.client.join_chat(join_target)
+                        logger.info(
+                            "auto_joined_channel",
+                            user_id=user_id,
+                            channel_id=chat.id,
+                            join_target=str(join_target),
+                        )
+                    except Exception as e:
+                        # Already joined or can't join - log and continue
+                        logger.debug(
+                            "join_chat_skipped",
+                            user_id=user_id,
+                            channel_id=chat.id,
+                            reason=str(e),
+                        )
+
                     # Check if already added
                     async with self._db.session() as session:
                         source_repo = SourceRepository(session)
