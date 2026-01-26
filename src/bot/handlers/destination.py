@@ -111,6 +111,11 @@ async def handle_destination_input(update: Update, context: ContextTypes.DEFAULT
             channel_title=channel_title,
         )
 
+        # Restart monitoring to update target (DM -> channel)
+        forwarder = context.bot_data.get("forwarder_service")
+        if forwarder and user.id in forwarder._active_users:
+            await forwarder.start_user_monitoring(user.id)
+
         await update.message.reply_text(
             Messages.DESTINATION_SUCCESS.format(
                 title=destination.channel_title,
@@ -141,6 +146,11 @@ async def reset_destination(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Clear destination
     dest_service: DestinationService = context.bot_data["destination_service"]
     await dest_service.clear_destination(user.id)
+
+    # Restart monitoring to update target (channel -> DM)
+    forwarder = context.bot_data.get("forwarder_service")
+    if forwarder and user.id in forwarder._active_users:
+        await forwarder.start_user_monitoring(user.id)
 
     await query.edit_message_text(
         "✅ Получатель сброшен.\n\nТеперь посты будут приходить в ЛС бота.",
