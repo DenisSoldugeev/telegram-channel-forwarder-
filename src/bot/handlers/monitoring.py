@@ -2,6 +2,7 @@ import structlog
 from telegram import Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
+from src.bot.handlers.decorators import require_auth
 from src.bot.keyboards import get_main_menu_keyboard
 from src.bot.messages import Messages
 from src.bot.states import MAIN_MENU
@@ -16,6 +17,7 @@ from src.storage.repositories import (
 logger = structlog.get_logger()
 
 
+@require_auth
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Show current status."""
     query = update.callback_query

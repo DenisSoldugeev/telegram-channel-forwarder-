@@ -8,6 +8,7 @@ from telegram.ext import (
     filters,
 )
 
+from src.bot.handlers.decorators import require_auth
 from src.bot.keyboards import get_cancel_keyboard, get_destination_keyboard, get_main_menu_keyboard
 from src.bot.messages import Messages
 from src.bot.states import DESTINATION_SETUP, MAIN_MENU
@@ -20,6 +21,7 @@ from src.storage.repositories import DestinationRepository
 logger = structlog.get_logger()
 
 
+@require_auth
 async def destination_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Show destination setup menu."""
     query = update.callback_query

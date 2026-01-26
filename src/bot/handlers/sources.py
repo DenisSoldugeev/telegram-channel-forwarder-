@@ -6,6 +6,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from src.bot.handlers.decorators import require_auth
 from src.bot.keyboards import (
     get_add_source_keyboard,
     get_cancel_keyboard,
@@ -51,6 +52,7 @@ def _restart_user_monitoring(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
         asyncio.create_task(_do_restart_monitoring(forwarder, user_id))
 
 
+@require_auth
 async def sources_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Show sources management menu."""
     query = update.callback_query
